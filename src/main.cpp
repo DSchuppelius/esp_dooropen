@@ -1,6 +1,11 @@
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#if defined(ESP32)
+  #include <WiFi.h>
+  #include <WebServer.h>
+#else
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+#endif
 #include <WiFiManager.h>
 #include <EEPROM.h>
 #include <Wire.h>
@@ -14,7 +19,11 @@
 //  Globale Objekte
 // ------------------------------------------------------------
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+#if defined(ESP32)
+WebServer server(80);
+#else
 ESP8266WebServer server(80);
+#endif
 
 // SIP: Ein- und Ausgabepuffer + Client
 char acSipIn[2048];
@@ -568,7 +577,11 @@ void setup() {
     ESP.restart();
   }
   // Modem-Sleep aus: sonst verschluckt der ESP Unicast-Pakete (Ping/HTTP)
+#if defined(ESP32)
+  WiFi.setSleep(false);
+#else
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#endif
   Serial.print(F("IP: "));
   Serial.println(WiFi.localIP());
 

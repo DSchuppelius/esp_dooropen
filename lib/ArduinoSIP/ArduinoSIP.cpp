@@ -583,14 +583,18 @@ uint32_t Sip::Millis() {
 uint32_t Sip::Random() {
 	
   // return ((((uint32_t)rand())&0x7fff)<<15) + ((((uint32_t)rand())&0x7fff));
+#if defined(ESP32)
+  return esp_random() & 0x3fffffff;   // ESP8266 hat secureRandom(), ESP32 nicht
+#else
   return secureRandom(0x3fffffff);
+#endif
 }
 
 
 int Sip::SendUdp() {
 	
   Udp.beginPacket(pSipIp, iSipPort);
-  Udp.write(pbuf, strlen(pbuf));
+  Udp.write((const uint8_t *)pbuf, strlen(pbuf));
   Udp.endPacket();
 #ifdef DEBUGLOG
   Serial.printf("\r\n----- send %i bytes -----------------------\r\n%s", strlen(pbuf), pbuf);

@@ -1,8 +1,32 @@
 #pragma once
 
 // ============================================================
-//  Pin-Belegung (HW-364A: NodeMCU mit fest verbautem OLED)
+//  Pin-Belegung
 // ============================================================
+#if defined(ESP32)
+// ---- ESP32 DevKit (WROOM-32) --------------------------------
+// Kein Onboard-OLED: I2C liegt auf den Standard-Pins (falls extern genutzt).
+#define PIN_SDA        21   // GPIO21 (I2C SDA)
+#define PIN_SCL        22   // GPIO22 (I2C SCL)
+
+// Ausgang zum Relais-Modul (schaltet den Summer)
+#define PIN_RELAY      26   // GPIO26
+// KY-019 schaltet bei HIGH ein -> active-high, daher false.
+// (Blaue Standard-Relaismodule waeren true.)
+#define RELAY_ACTIVE_LOW  false
+
+// Eingang fuer die Signalisierung (potentialfreier Kontakt)
+// Eine Ader an diesen Pin, die andere an GND.
+#define PIN_SIGNAL     27   // GPIO27
+// Kontakt schliesst gegen GND -> gedrueckt = LOW.
+#define SIGNAL_ACTIVE_LOW true
+
+// Onboard-LED (GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
+#define PIN_STATUS_LED    2       // GPIO2 (Onboard-LED, active-high)
+#define STATUS_LED_ACTIVE_LOW false
+
+#else
+// ---- ESP8266 HW-364A (NodeMCU mit fest verbautem OLED) -------
 // I2C fuer das ONBOARD-OLED (fest verdrahtet, NICHT aenderbar!)
 #define PIN_SDA        D5   // GPIO14  (Onboard-OLED)
 #define PIN_SCL        D6   // GPIO12  (Onboard-OLED)
@@ -22,6 +46,7 @@
 // Onboard-LED (blaue LED, GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
 #define PIN_STATUS_LED    LED_BUILTIN
 #define STATUS_LED_ACTIVE_LOW true
+#endif
 
 // ============================================================
 //  Display
