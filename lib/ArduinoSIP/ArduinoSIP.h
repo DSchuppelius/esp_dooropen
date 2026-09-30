@@ -58,19 +58,31 @@ class Sip
     bool        Dial(const char *DialNr, const char *DialDesc = "");
 	void		Processing(char *pBuf, size_t lBuf);
     bool        IsBusy() { return iRingTime != 0; }	
-    // Blockierendes REGISTER mit Digest-Auth; true bei 200 OK. (Erweiterung)
-    bool        Register(int Expires = 3600);
+    // Nicht-blockierendes REGISTER mit Digest-Auth; Ergebnis per IsRegistered(),
+    // sobald IsRegistering() false ist (Antworten laufen ueber Processing()). (Erweiterung)
+    void        StartRegister(int Expires = 3600);
+    bool        IsRegistering() { return bRegPending; }
     bool        IsRegistered() { return bRegistered; }
     // Beep-Dauer (Sekunden) fuer den RTP-Ton nach dem Abheben; 0 = kein Audio.
     void        SetBeepSeconds(int s) { iBeepSeconds = s; }
     // Liefert die zuletzt empfangene DTMF-Taste (0 wenn keine) und loescht sie.
     char        ReadDtmf() { char c = cLastDtmf; cLastDtmf = 0; return c; }
-	
+    // Anruf sofort beenden: BYE wenn angenommen, sonst CANCEL. (Erweiterung)
+    void        Hangup();
+
   private:
     char       *pbuf;
     size_t      lbuf;
     char        caRead[256];
     bool        bRegistered = false;
+
+    // REGISTER-Zustand (Erweiterung)
+    bool        bRegPending = false;
+    uint32_t    regSentAt = 0;
+    uint32_t    regCallId = 0;
+    uint32_t    regTag = 0;
+    int         iRegCSeq = 1;
+    int         iRegExpires = 3600;
 
     const char *pSipIp;
     int         iSipPort;
@@ -90,7 +102,9 @@ class Sip
     uint32_t    iMaxTime;
     int         iDialRetries;
     int         iLastCSeq;
-    
+    int         iInviteCSeq = 1;
+    bool        bAnswered = false;
+
 	WiFiUDP 	Udp;
 
     // RTP / Beep-Audio (Erweiterung)
@@ -105,6 +119,7 @@ class Sip
     uint16_t    rtpSeq = 0;
     uint32_t    rtpTs = 0;
     uint32_t    rtpSsrc = 0;
+    uint32_t    rtpFrame = 0;
     int         iBeepSeconds = 0;
     uint8_t     ulawTone[8];
     bool        bToneReady = false;
@@ -117,8 +132,12 @@ class Sip
     bool        ParseParameter(char *dest, int destlen, const char *name, const char *line, char cq = '\"');
     bool        ParseReturnParams(const char *p);
     int         GrepInteger(const char *p, const char *psearch);
+    bool        IsResponseTo(const char *p, const char *method);
+    bool        IsCallId(const char *p, uint32_t id32);
+    void        SendRegister(const char *pAuth);
+    void        HandleRegisterResponse(const char *p);
     void        Ack(const char *pIn);
-    void        Cancel(int seqn);
+    void        Cancel();
     void        Bye(int cseq);
     void        Ok(const char *pIn);
     void        Invite(const char *pIn = 0);
@@ -132,6 +151,7 @@ class Sip
     void        StartRtp(const char *pIn);
     void        StopCall();
     void        RtpProcessing();
+    void        SendRtpFrame();
     uint8_t     Lin2Ulaw(int16_t sample);
 
 };

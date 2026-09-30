@@ -76,92 +76,93 @@ void Sip::Init(const char *SipIp, int SipPort, const char *MyIp, int MyPort, con
   iAuthCnt = 0;
   iRingTime = 0;
   iMaxTime = MaxDialSec * 1000;
+  bRegistered = false;   // neue Zugangsdaten -> neu registrieren
+  bRegPending = false;
 }
 
 
-// Blockierendes REGISTER mit Digest-Auth (Erweiterung ggue. Original).
-// Sendet REGISTER, beantwortet 401/407 mit Digest, wartet auf 200 OK.
-bool Sip::Register(int Expires) {
+// Nicht-blockierendes REGISTER mit Digest-Auth (Erweiterung ggue. Original).
+// Sendet REGISTER; die Antworten (401/407 -> erneut mit Digest, 200 OK) werden
+// in Processing() ausgewertet, sodass die Loop dabei weiterlaeuft.
+void Sip::StartRegister(int Expires) {
 
+  iRegExpires  = Expires;
+  regCallId    = Random();
+  regTag       = Random();
+  iRegCSeq     = 1;
+  bRegPending  = true;
+  SendRegister(0);
+}
+
+
+// REGISTER senden; pAuth = fertiger Authorization-Header oder 0
+void Sip::SendRegister(const char *pAuth) {
+
+  pbuf[0] = 0;
+  AddSipLine("REGISTER sip:%s SIP/2.0", pSipIp);
+  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=%010u;rport", pMyIp, iMyPort, Random());
+  AddSipLine("Max-Forwards: 70");
+  AddSipLine("From: <sip:%s@%s>;tag=%010u", pSipUser, pSipIp, regTag);
+  AddSipLine("To: <sip:%s@%s>", pSipUser, pSipIp);
+  AddSipLine("Call-ID: %010u@%s", regCallId, pMyIp);
+  AddSipLine("CSeq: %i REGISTER", iRegCSeq);
+  AddSipLine("Contact: <sip:%s@%s:%i;transport=udp>", pSipUser, pMyIp, iMyPort);
+  if ( pAuth )
+    AddSipLine("%s", pAuth);
+  AddSipLine("Expires: %i", iRegExpires);
+  AddSipLine("Content-Length: 0");
+  AddSipLine("");
+  SendUdp();
+  regSentAt = millis();
+}
+
+
+void Sip::HandleRegisterResponse(const char *p) {
+
+  if ( !bRegPending || !IsCallId(p, regCallId) )
+    return;   // verspaetete Antwort einer frueheren Registrierung
+
+  if ( strstr(p, "SIP/2.0 1") == p )   // 1xx: weiter warten
+    return;
+
+  if ( strstr(p, "SIP/2.0 200") == p )
+  {
+    bRegistered = true;
+    bRegPending = false;
+    return;
+  }
+
+  bool challenge = strstr(p, "SIP/2.0 401") == p || strstr(p, "SIP/2.0 407") == p;
   char caRealm[128];
   char caNonce[160];
-  char rbuf[700];
-  char *haResp = 0;
 
-  uint32_t regCallId = Random();
-  uint32_t regTag    = Random();
-
-  bRegistered = false;
-
-  for ( int attempt = 0; attempt < 2; attempt++ )
+  // Nur einmal mit Digest antworten; kein fuehrendes Leerzeichen bei realm/nonce:
+  // manche Server (z.B. LANCOM) trennen ohne Space
+  if ( challenge && iRegCSeq == 1
+       && ParseParameter(caRealm, (int)sizeof(caRealm), "realm=\"", p)
+       && ParseParameter(caNonce, (int)sizeof(caNonce), "nonce=\"", p) )
   {
-    int cseq = attempt + 1;
-    uint32_t branch = Random();
+    char ha1Hex[33], ha2Hex[33], haResp[33], temp[256];
+    snprintf(temp, sizeof(temp), "%s:%s:%s", pSipUser, caRealm, pSipPassWd);
+    MakeMd5Digest(ha1Hex, temp);
+    snprintf(temp, sizeof(temp), "REGISTER:sip:%s", pSipIp);
+    MakeMd5Digest(ha2Hex, temp);
+    snprintf(temp, sizeof(temp), "%s:%s:%s", ha1Hex, caNonce, ha2Hex);
+    MakeMd5Digest(haResp, temp);
 
-    pbuf[0] = 0;
-    AddSipLine("REGISTER sip:%s SIP/2.0", pSipIp);
-    AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=%010u;rport", pMyIp, iMyPort, branch);
-    AddSipLine("Max-Forwards: 70");
-    AddSipLine("From: <sip:%s@%s>;tag=%010u", pSipUser, pSipIp, regTag);
-    AddSipLine("To: <sip:%s@%s>", pSipUser, pSipIp);
-    AddSipLine("Call-ID: %010u@%s", regCallId, pMyIp);
-    AddSipLine("CSeq: %i REGISTER", cseq);
-    AddSipLine("Contact: <sip:%s@%s:%i;transport=udp>", pSipUser, pMyIp, iMyPort);
-    if ( haResp )
-    {
-      AddSipLine("Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"sip:%s\", response=\"%s\"",
-                 pSipUser, caRealm, caNonce, pSipIp, haResp);
-    }
-    AddSipLine("Expires: %i", Expires);
-    AddSipLine("Content-Length: 0");
-    AddSipLine("");
-    SendUdp();
-
-    uint32_t t0 = millis();
-    bool got401 = false;
-    while ( (millis() - t0) < 2000 )
-    {
-      int ps = Udp.parsePacket();
-      if ( ps > 0 )
-      {
-        int n = Udp.read(rbuf, sizeof(rbuf) - 1);
-        if ( n > 0 )
-        {
-          rbuf[n] = 0;
-#ifdef DEBUGLOG
-          Serial.printf("\r\n----- REGISTER resp %i bytes -----\r\n%s\r\n", n, rbuf);
-#endif
-          if ( strstr(rbuf, "SIP/2.0 200") == rbuf )
-          {
-            bRegistered = true;
-            return true;
-          }
-          if ( ( strstr(rbuf, "SIP/2.0 401") == rbuf || strstr(rbuf, "SIP/2.0 407") == rbuf ) && !haResp )
-          {
-            // Kein fuehrendes Leerzeichen: manche Server (z.B. LANCOM) trennen ohne Space
-            if ( ParseParameter(caRealm, (int)sizeof(caRealm), "realm=\"", rbuf) &&
-                 ParseParameter(caNonce, (int)sizeof(caNonce), "nonce=\"", rbuf) )
-            {
-              char ha1Hex[33], ha2Hex[33], temp[256];
-              haResp = pbuf + lbuf - 34;   // ans Pufferende: bleibt beim Neuaufbau erhalten
-              snprintf(temp, sizeof(temp), "%s:%s:%s", pSipUser, caRealm, pSipPassWd);
-              MakeMd5Digest(ha1Hex, temp);
-              snprintf(temp, sizeof(temp), "REGISTER:sip:%s", pSipIp);
-              MakeMd5Digest(ha2Hex, temp);
-              snprintf(temp, sizeof(temp), "%s:%s:%s", ha1Hex, caNonce, ha2Hex);
-              MakeMd5Digest(haResp, temp);
-              got401 = true;
-            }
-            break;   // erneut mit Authorization senden
-          }
-        }
-      }
-      delay(10);
-    }
-    if ( !got401 && !bRegistered )
-      break;   // keine Auth-Aufforderung und kein OK -> abbrechen
+    char auth[400];
+    snprintf(auth, sizeof(auth),
+             "%s: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"sip:%s\", response=\"%s\"",
+             strstr(p, "Proxy-Authenticate") ? "Proxy-Authorization" : "Authorization",
+             pSipUser, caRealm, caNonce, pSipIp, haResp);
+    iRegCSeq++;
+    SendRegister(auth);
+    return;
   }
-  return bRegistered;
+
+  // Jede andere Endantwort (oder erneute Auth-Aufforderung) = fehlgeschlagen
+  bRegistered = false;
+  bRegPending = false;
 }
 
 
@@ -171,6 +172,7 @@ bool Sip::Dial(const char *DialNr, const char *DialDesc) {
     return false;
 
   iDialRetries = 0;
+  bAnswered = false;
   pDialNr = DialNr;
   pDialDesc = DialDesc;
   Invite();
@@ -203,6 +205,13 @@ void Sip::Processing(char *pBuf, size_t lBuf) {
     }
   }
   
+  // REGISTER ohne Antwort -> abbrechen, der Aufrufer versucht es spaeter erneut
+  if ( bRegPending && (millis() - regSentAt) > 2000 )
+  {
+    bRegPending = false;
+    bRegistered = false;
+  }
+
   HandleUdpPacket((packetSize > 0) ? pBuf : 0 );
   RtpProcessing();
 }
@@ -213,11 +222,7 @@ void Sip::HandleUdpPacket(const char *p) {
   uint32_t iWorkTime = iRingTime ? (Millis() - iRingTime) : 0;
   
   if ( iRingTime && iWorkTime > iMaxTime )
-  {
-    // Cancel(3);
-    Bye(3);
-    iRingTime = 0;
-  }
+    Hangup();   // nicht angenommen -> CANCEL, sonst BYE
 
   if ( !p )
   {
@@ -229,6 +234,21 @@ void Sip::HandleUdpPacket(const char *p) {
       Invite();
     }
 	
+    return;
+  }
+
+  if ( IsResponseTo(p, "REGISTER") )
+  {
+    HandleRegisterResponse(p);
+    return;
+  }
+
+  // Requests eines alten Dialogs (z.B. verspaetetes BYE) noch hoeflich mit
+  // 200 OK beantworten, aber den laufenden Anruf nicht anfassen.
+  if ( !IsCallId(p, callid) )
+  {
+    if ( strstr(p, "BYE") == p || strstr(p, "INFO") == p )
+      Ok(p);
     return;
   }
 
@@ -247,21 +267,31 @@ void Sip::HandleUdpPacket(const char *p) {
   }
   else if ( strstr(p, "SIP/2.0 200") == p )		// OK
   {
-    ParseReturnParams(p);
-    Ack(p);
-    // 200 OK auf unser INVITE -> Anruf angenommen, Beep-Audio starten
-    if ( iBeepSeconds > 0 && !bInCall && strstr(p, " INVITE") )
-      StartRtp(p);
+    // Nur das 200 OK auf unser INVITE auswerten. Ein 200 OK auf BYE/INFO
+    // darf weder ACKt werden noch (z.B. wegen "Allow: INVITE, ...") das
+    // Beep-Audio erneut starten - sonst legt der Geister-Timer spaeter
+    // den naechsten Anruf per BYE auf.
+    if ( IsResponseTo(p, "INVITE") )
+    {
+      ParseReturnParams(p);
+      Ack(p);
+      if ( !iRingTime )
+      {
+        // Angenommen, waehrend unser CANCEL unterwegs war -> sauber beenden
+        Bye(iInviteCSeq + 1);
+        return;
+      }
+      bAnswered = true;
+      // Anruf angenommen, Beep-Audio starten
+      if ( iBeepSeconds > 0 && !bInCall )
+        StartRtp(p);
+    }
   }
   else if (    strstr(p, "SIP/2.0 183 ") == p 	// Session Progress
-            || strstr(p, "SIP/2.0 180 ") == p )	// Ringing
+            || strstr(p, "SIP/2.0 180 ") == p 	// Ringing
+            || strstr(p, "SIP/2.0 100 ") == p )	// Trying (vorlaeufig: kein ACK)
   {
     ParseReturnParams(p);
-  }
-  else if ( strstr(p, "SIP/2.0 100 ") == p )	// Trying
-  {
-    ParseReturnParams(p);
-    Ack(p);
   }
   else if (    strstr(p, "SIP/2.0 486 ") == p 	// Busy Here
             || strstr(p, "SIP/2.0 603 ") == p 	// Decline
@@ -372,6 +402,37 @@ bool Sip::ParseReturnParams(const char *p) {
 }
 
 
+// Prueft, ob das Paket (p) die Call-ID "<id>@<eigene IP>" traegt
+bool Sip::IsCallId(const char *p, uint32_t id32) {
+
+  const char *pc = strstr(p, "\nCall-ID: ");
+
+  if ( !pc )
+    return false;
+
+  char id[40];
+  snprintf(id, sizeof(id), "%010u@%s", id32, pMyIp);
+  return strncmp(pc + 10, id, strlen(id)) == 0;
+}
+
+
+// Prueft, ob die Antwort (p) zur angegebenen Methode gehoert (CSeq-Zeile)
+bool Sip::IsResponseTo(const char *p, const char *method) {
+
+  const char *pc = strstr(p, "\nCSeq: ");
+
+  if ( !pc )
+    return false;
+
+  pc += 7;
+  while ( *pc == ' ' || ( *pc >= '0' && *pc <= '9' ) )
+    pc++;
+
+  size_t l = strlen(method);
+  return strncmp(pc, method, l) == 0 && ( pc[l] == '\r' || pc[l] == '\n' || pc[l] == ' ' || pc[l] == 0 );
+}
+
+
 int Sip::GrepInteger(const char *p, const char *psearch) {
 
   int param = -1;
@@ -409,17 +470,18 @@ void Sip::Ack(const char *p) {
 }
 
 
-void Sip::Cancel(int cseq) {
-  
-  if ( caRead[0] == 0 )
-    return;
+// CANCEL fuer das noch nicht angenommene INVITE. Muss Request-URI, Call-ID,
+// From, To (ohne Tag), Via und CSeq-Nummer des INVITE exakt uebernehmen.
+void Sip::Cancel() {
 
   pbuf[0] = 0;
-  AddSipLine("%s sip:%s@%s SIP/2.0",  "CANCEL", pDialNr, pSipIp);
-  AddSipLine("%s",  caRead);
-  AddSipLine("CSeq: %i %s",  cseq, "CANCEL");
+  AddSipLine("CANCEL sip:%s@%s SIP/2.0", pDialNr, pSipIp);
+  AddSipLine("Call-ID: %010u@%s", callid, pMyIp);
+  AddSipLine("CSeq: %i CANCEL", iInviteCSeq);
   AddSipLine("Max-Forwards: 70");
-  AddSipLine("User-Agent: sip-client/0.0.1");
+  AddSipLine("From: \"%s\"  <sip:%s@%s>;tag=%010u", pDialDesc, pSipUser, pSipIp, tagid);
+  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=%010u;rport=%i", pMyIp, iMyPort, branchid, iMyPort);
+  AddSipLine("To: <sip:%s@%s>", pDialNr, pSipIp);
   AddSipLine("Content-Length: 0");
   AddSipLine("");
   SendUdp();
@@ -563,6 +625,7 @@ void Sip::Invite(const char *p) {
     AddSipLine("");
   }
   caRead[0] = 0;
+  iInviteCSeq = cseq;   // fuer CANCEL (gleiche Nummer) und BYE (hoeher)
   SendUdp();
 }
 
@@ -635,6 +698,7 @@ uint8_t Sip::Lin2Ulaw(int16_t sample) {
 
 // 200 OK ausgewertet: Gegenstellen-RTP-Ziel ermitteln und Streaming starten
 void Sip::StartRtp(const char *p) {
+  remoteRtpPort = 0;   // keine Werte vom vorherigen Anruf weiterverwenden
   const char *m = strstr(p, "m=audio ");
   if (m) remoteRtpPort = (uint16_t)atoi(m + 8);
   const char *c = strstr(p, "c=IN IP4 ");
@@ -663,6 +727,7 @@ void Sip::StartRtp(const char *p) {
   rtpSsrc = Random();
   callAnsweredAt = millis();
   lastRtpAt = 0;
+  rtpFrame = 0;
   bInCall = true;
 #ifdef DEBUGLOG
   Serial.printf("\r\n----- RTP start -> %s:%i -----\r\n", remoteRtpIp.toString().c_str(), remoteRtpPort);
@@ -671,6 +736,18 @@ void Sip::StartRtp(const char *p) {
 
 void Sip::StopCall() {
   bInCall = false;
+}
+
+void Sip::Hangup() {
+  if ( !iRingTime )
+    return;
+
+  if ( bAnswered )
+    Bye(iInviteCSeq + 1);   // CSeq muss ueber der des INVITE liegen
+  else
+    Cancel();               // klingelt noch -> Anruf zurueckziehen
+  StopCall();
+  iRingTime = 0;
 }
 
 // Sendet alle 20 ms ein RTP-Frame (160 u-law Samples) und legt nach der Beep-Dauer auf
@@ -701,18 +778,30 @@ void Sip::RtpProcessing() {
 
   uint32_t now = millis();
   if (now - callAnsweredAt > (uint32_t)iBeepSeconds * 1000UL) {
-    Bye(2);
-    StopCall();
-    iRingTime = 0;
+    Hangup();
     return;
   }
-  if (lastRtpAt != 0 && (now - lastRtpAt) < 20) return;
-  lastRtpAt = now;
+  // Fester 20-ms-Takt (lastRtpAt = Faelligkeit des naechsten Frames). Nicht auf
+  // "now" setzen, sonst driftet der Takt und der Jitterbuffer der Gegenstelle
+  // laeuft leer -> hackeliger Ton. Verpasste Frames (loop blockiert) nachholen.
+  if (lastRtpAt == 0) lastRtpAt = now;
+  int32_t late = (int32_t)(now - lastRtpAt);
+  if (late < 0) return;
+  if (late > 100) { lastRtpAt = now; late = 0; }   // zu weit hinten: neu aufsetzen
 
+  for (int k = 0; k <= late / 20; k++)
+  {
+    SendRtpFrame();
+    lastRtpAt += 20;
+  }
+}
+
+// Ein RTP-Frame (20 ms, 160 u-law Samples) senden
+void Sip::SendRtpFrame() {
   uint8_t pkt[12 + 160];
   pkt[0] = 0x80;
   pkt[1] = 0x00;                              // Payload Type 0 = PCMU
-  if (rtpTs == 0) pkt[1] |= 0x80;             // Marker beim ersten Frame
+  if (rtpFrame == 0) pkt[1] |= 0x80;          // Marker beim ersten Frame
   pkt[2] = (rtpSeq >> 8) & 0xFF;
   pkt[3] = rtpSeq & 0xFF;
   pkt[4] = (rtpTs >> 24) & 0xFF;
@@ -724,8 +813,9 @@ void Sip::RtpProcessing() {
   pkt[10] = (rtpSsrc >> 8) & 0xFF;
   pkt[11] = rtpSsrc & 0xFF;
 
-  // Muster: 200 ms Ton, 200 ms Pause
-  bool on = ((now - callAnsweredAt) % 400) < 200;
+  // Muster: 200 ms Ton, 200 ms Pause (10 Frames an, 10 aus) - am Stream-Takt
+  // ausgerichtet statt an millis(), damit die Toene sauber geschnitten sind
+  bool on = (rtpFrame % 20) < 10;
   for (int i = 0; i < 160; i++)
     pkt[12 + i] = on ? ulawTone[i & 7] : 0xFF;   // 0xFF = u-law Stille
 
@@ -735,5 +825,6 @@ void Sip::RtpProcessing() {
 
   rtpSeq++;
   rtpTs += 160;
+  rtpFrame++;
 }
 

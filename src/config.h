@@ -11,8 +11,7 @@
 
 // Ausgang zum Relais-Modul (schaltet den Summer)
 #define PIN_RELAY      26   // GPIO26
-// KY-019 schaltet bei HIGH ein -> active-high, daher false.
-// (Blaue Standard-Relaismodule waeren true.)
+// KY-019 (Aufdruck HW-482) schaltet bei HIGH ein -> active-high.
 #define RELAY_ACTIVE_LOW  false
 
 // Eingang fuer die Signalisierung (potentialfreier Kontakt)
@@ -53,7 +52,7 @@
 // ============================================================
 #define OLED_WIDTH     128
 #define OLED_HEIGHT    64
-#define OLED_ADDR      0x3C   // haeufig 0x3C, manche Module 0x3D
+// Adresse wird per I2C-Scan ermittelt (0x3C oder 0x3D); ohne Fund kein Display.
 
 // ============================================================
 //  Verhalten
@@ -81,8 +80,22 @@
 // Registrierungsdauer in Sekunden; es wird rechtzeitig erneuert.
 // (LANCOM begrenzt auf 120s -> hier klein halten.)
 #define SIP_REG_EXPIRES  120
+// Wartezeit bis zum naechsten Versuch, wenn die Registrierung fehlgeschlagen ist.
+#define SIP_REG_RETRY_SEC 10
 // Beep-Dauer im Hoerer nach dem Abheben (Sekunden); 0 = nur klingeln, kein Audio.
 #define SIP_BEEP_SECONDS 6
+
+// ============================================================
+//  Home Assistant (MQTT mit Auto-Discovery)
+//  Broker wird ueber die Weboberflaeche gesetzt; leerer Server = MQTT aus.
+// ============================================================
+#define MQTT_SERVER            ""
+#define MQTT_PORT              1883
+#define MQTT_USER              ""
+#define MQTT_PW                ""
+#define MQTT_DISCOVERY_PREFIX  "homeassistant"
+// Max. Wartezeit beim Verbindungsaufbau; die Loop steht solange (ms).
+#define MQTT_CONNECT_TIMEOUT_MS 1000
 
 // Bildschirmschoner: OLED nach X Sekunden ohne Aktivitaet ausschalten (0 = nie).
 #define SCREEN_TIMEOUT_SECONDS 60

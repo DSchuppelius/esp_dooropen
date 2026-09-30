@@ -12,6 +12,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ArduinoSIP.h>
+#include <PubSubClient.h>
 
 #include "config.h"
 
@@ -54,11 +55,27 @@ String   sipUser           = SIP_USER;
 String   sipPw             = SIP_PW;
 uint32_t lastRegisterAt    = 0;
 
+// Home Assistant / MQTT
+WiFiClient   mqttNet;
+PubSubClient mqtt(mqttNet);
+String   mqttServer        = MQTT_SERVER;
+uint16_t mqttPort          = MQTT_PORT;
+String   mqttUser          = MQTT_USER;
+String   mqttPw            = MQTT_PW;
+char     mqttServerBuf[41];              // PubSubClient merkt sich nur den Zeiger
+String   devId;                          // z.B. "tueroeffner_a1b2c3" (aus der MAC)
+String   baseTopic;                      // z.B. "tueroeffner/a1b2c3"
+uint32_t mqttLastTry       = 0;
+uint32_t mqttRetryMs       = 5000;       // waechst bei Fehlschlag bis 60 s
+bool     mqttDiscoveryDue  = false;      // Discovery (erneut) senden
+bool     mqttStateDue      = false;      // Zustand sofort senden
+
 bool     signalActive      = false;  // aktueller (entprellter) Zustand
 bool     lastSignalRaw     = false;
 uint32_t lastSignalChange  = 0;
 uint32_t signalCount       = 0;
 uint32_t lastRingAt        = 0;      // millis des letzten Klingelns
+bool     hasDisplay        = false;  // OLED beim I2C-Scan gefunden?
 bool     displayDirty      = true;
 uint32_t lastActivityAt    = 0;      // fuer Bildschirmschoner
 bool     displayOn         = true;
@@ -67,6 +84,7 @@ bool     displayOn         = true;
 //  EEPROM Persistenz (als Struct)
 // ------------------------------------------------------------
 static const uint8_t SETTINGS_MAGIC = 0x53;   // aendern, wenn sich Layout aendert
+static const uint8_t MQTT_MAGIC     = 0x4D;   // Kennung fuer den angehaengten MQTT-Block
 struct Settings {
   uint8_t  magic;
   uint8_t  buzzerSeconds;
@@ -76,6 +94,13 @@ struct Settings {
   char     sipServer[41];
   char     sipUser[25];
   char     sipPw[33];
+  // Nachtraeglich HINTEN angehaengt, damit aeltere Einstellungen gueltig bleiben.
+  // Fehlt der Block (mqttMagic falsch), gelten die Defaults aus config.h.
+  uint8_t  mqttMagic;
+  uint16_t mqttPort;
+  char     mqttServer[41];
+  char     mqttUser[33];
+  char     mqttPw[33];
 };
 static const uint16_t EEPROM_SIZE = sizeof(Settings) + 8;
 
@@ -103,6 +128,15 @@ void loadSettings() {
   sipServer = String(s.sipServer);
   sipUser   = String(s.sipUser);
   sipPw     = String(s.sipPw);
+
+  if (s.mqttMagic != MQTT_MAGIC) return;   // Einstellungen von vor dem MQTT-Update
+  if (s.mqttPort > 0) mqttPort = s.mqttPort;
+  s.mqttServer[sizeof(s.mqttServer) - 1] = '\0';
+  s.mqttUser[sizeof(s.mqttUser) - 1]     = '\0';
+  s.mqttPw[sizeof(s.mqttPw) - 1]         = '\0';
+  mqttServer = String(s.mqttServer);
+  mqttUser   = String(s.mqttUser);
+  mqttPw     = String(s.mqttPw);
 }
 
 void saveSettings() {
@@ -116,6 +150,11 @@ void saveSettings() {
   copyToField(s.sipServer, sizeof(s.sipServer), sipServer);
   copyToField(s.sipUser,   sizeof(s.sipUser),   sipUser);
   copyToField(s.sipPw,     sizeof(s.sipPw),     sipPw);
+  s.mqttMagic     = MQTT_MAGIC;
+  s.mqttPort      = mqttPort;
+  copyToField(s.mqttServer, sizeof(s.mqttServer), mqttServer);
+  copyToField(s.mqttUser,   sizeof(s.mqttUser),   mqttUser);
+  copyToField(s.mqttPw,     sizeof(s.mqttPw),     mqttPw);
   EEPROM.put(0, s);
   EEPROM.commit();
 }
@@ -130,13 +169,18 @@ void initSip() {
   aSip.Init(sipServerBuf, sipPort, myIpBuf, sipPort,
             sipUserBuf, sipPwBuf, SIP_MAX_DIAL_SEC);
   aSip.SetBeepSeconds(SIP_BEEP_SECONDS);
-  bool reg = false;
-  for (int i = 0; i < 3 && !reg; i++) {   // erster Versuch nach Boot scheitert oft am Timing
-    reg = aSip.Register(SIP_REG_EXPIRES);
-    if (!reg) delay(500);
+  // Hier bewusst blockierend warten (Boot / neue Zugangsdaten), damit das
+  // Ergebnis gleich feststeht. Erneuerungen laufen spaeter nebenher in loop().
+  for (int i = 0; i < 3 && !aSip.IsRegistered(); i++) {   // erster Versuch nach Boot scheitert oft am Timing
+    if (i > 0) delay(500);
+    aSip.StartRegister(SIP_REG_EXPIRES);
+    while (aSip.IsRegistering()) {
+      aSip.Processing(acSipIn, sizeof(acSipIn));
+      delay(5);
+    }
   }
   lastRegisterAt = millis();
-  Serial.printf("SIP-REGISTER: %s\n", reg ? "OK" : "fehlgeschlagen");
+  Serial.printf("SIP-REGISTER: %s\n", aSip.IsRegistered() ? "OK" : "fehlgeschlagen");
 }
 
 // ------------------------------------------------------------
@@ -152,7 +196,7 @@ void setRelay(bool on) {
 // Aktivitaet melden -> Bildschirmschoner-Timer zuruecksetzen und Display wecken
 void markActivity() {
   lastActivityAt = millis();
-  if (!displayOn) {
+  if (hasDisplay && !displayOn) {
     display.ssd1306_command(SSD1306_DISPLAYON);
     displayOn = true;
     displayDirty = true;
@@ -178,7 +222,7 @@ void stopBuzzer() {
 bool placeCall() {
   if (dialNr.length() == 0) return false;
   copyToField(dialBuf, sizeof(dialBuf), dialNr);
-  aSip.Dial(dialBuf, SIP_CALLER_NAME);
+  if (!aSip.Dial(dialBuf, SIP_CALLER_NAME)) return false;   // Anruf laeuft schon
   callCount++;
   markActivity();
   return true;
@@ -187,14 +231,17 @@ bool placeCall() {
 // ------------------------------------------------------------
 //  Display
 // ------------------------------------------------------------
+// Wird der "Es klingelt"-Hinweis gerade angezeigt?
+bool isRinging() {
+  return lastRingAt != 0 && (millis() - lastRingAt) < RING_NOTIFY_MS;
+}
+
 void drawDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  bool ringing = (millis() - lastRingAt) < RING_NOTIFY_MS && lastRingAt != 0;
-
   // Auffaelliger Klingel-Screen
-  if (ringing) {
+  if (isRinging()) {
     display.setTextSize(2);
     display.setCursor(8, 8);
     display.println(F("ES"));
@@ -238,6 +285,170 @@ void drawDisplay() {
 }
 
 // ------------------------------------------------------------
+//  Home Assistant (MQTT mit Auto-Discovery)
+// ------------------------------------------------------------
+// Eine Entitaet per Discovery anlegen; cfg = entitaetsspezifische JSON-Felder
+void mqttDiscover(const char *component, const char *object, const String &cfg) {
+  String topic = String(MQTT_DISCOVERY_PREFIX) + "/" + component + "/" + devId + "/" + object + "/config";
+  String p = "{" + cfg;
+  p += ",\"unique_id\":\"" + devId + "_" + object + "\"";
+  p += ",\"availability_topic\":\"" + baseTopic + "/status\"";
+  p += ",\"device\":{\"identifiers\":[\"" + devId + "\"],\"name\":\"Türöffner\","
+       "\"manufacturer\":\"DIY\",\"model\":\"ESP SIP-Türöffner\","
+       "\"configuration_url\":\"http://" + WiFi.localIP().toString() + "\"}}";
+  mqtt.publish(topic.c_str(), p.c_str(), true);
+}
+
+void mqttPublishDiscovery() {
+  const String st  = ",\"state_topic\":\"" + baseTopic + "/state\"";
+  const String cmd = ",\"command_topic\":\"" + baseTopic + "/";
+
+  mqttDiscover("button", "open",
+    "\"name\":\"Tür öffnen\",\"icon\":\"mdi:door-open\"" + cmd + "open/set\"");
+  mqttDiscover("event", "doorbell",
+    "\"name\":\"Klingel\",\"device_class\":\"doorbell\",\"event_types\":[\"ring\"]"
+    ",\"state_topic\":\"" + baseTopic + "/doorbell\"");
+  mqttDiscover("binary_sensor", "ringing",
+    "\"name\":\"Es klingelt\",\"icon\":\"mdi:bell-ring\"" + st +
+    ",\"value_template\":\"{{ 'ON' if value_json.ringing else 'OFF' }}\"");
+  mqttDiscover("binary_sensor", "buzzer",
+    "\"name\":\"Summer\",\"device_class\":\"lock\"" + st +
+    ",\"value_template\":\"{{ 'ON' if value_json.buzzer else 'OFF' }}\"");
+  mqttDiscover("binary_sensor", "sip",
+    "\"name\":\"SIP registriert\",\"device_class\":\"connectivity\",\"entity_category\":\"diagnostic\"" + st +
+    ",\"value_template\":\"{{ 'ON' if value_json.sip else 'OFF' }}\"");
+  mqttDiscover("switch", "callonring",
+    "\"name\":\"Beim Klingeln anrufen\",\"icon\":\"mdi:phone-ring\",\"entity_category\":\"config\"" + st + cmd +
+    "callonring/set\",\"value_template\":\"{{ 'ON' if value_json.callonring else 'OFF' }}\"");
+  mqttDiscover("number", "duration",
+    "\"name\":\"Summer-Dauer\",\"icon\":\"mdi:timer-outline\",\"entity_category\":\"config\""
+    ",\"min\":" + String(MIN_BUZZER_SECONDS) + ",\"max\":" + String(MAX_BUZZER_SECONDS) +
+    ",\"mode\":\"box\",\"unit_of_measurement\":\"s\"" + st + cmd +
+    "duration/set\",\"value_template\":\"{{ value_json.seconds }}\"");
+  mqttDiscover("sensor", "rings",
+    "\"name\":\"Klingeln\",\"icon\":\"mdi:bell\",\"state_class\":\"total_increasing\",\"entity_category\":\"diagnostic\"" + st +
+    ",\"value_template\":\"{{ value_json.rings }}\"");
+  mqttDiscover("sensor", "openings",
+    "\"name\":\"Öffnungen\",\"icon\":\"mdi:door\",\"state_class\":\"total_increasing\",\"entity_category\":\"diagnostic\"" + st +
+    ",\"value_template\":\"{{ value_json.openings }}\"");
+  mqttDiscover("sensor", "calls",
+    "\"name\":\"Anrufe\",\"icon\":\"mdi:phone\",\"state_class\":\"total_increasing\",\"entity_category\":\"diagnostic\"" + st +
+    ",\"value_template\":\"{{ value_json.calls }}\"");
+}
+
+String mqttStateJson() {
+  String j = "{\"ringing\":";
+  j += isRinging() ? "true" : "false";
+  j += ",\"buzzer\":";     j += buzzerActive ? "true" : "false";
+  j += ",\"sip\":";        j += aSip.IsRegistered() ? "true" : "false";
+  j += ",\"callonring\":"; j += callOnRing ? "true" : "false";
+  j += ",\"seconds\":";    j += buzzerSeconds;
+  j += ",\"rings\":";      j += signalCount;
+  j += ",\"openings\":";   j += buzzerTriggers;
+  j += ",\"calls\":";      j += callCount;
+  j += "}";
+  return j;
+}
+
+// Klingel-Ereignis fuer Automationen (Event-Entitaet, nicht retained)
+void mqttRing() {
+  if (mqtt.connected())
+    mqtt.publish((baseTopic + "/doorbell").c_str(), "{\"event_type\":\"ring\"}");
+  mqttStateDue = true;
+}
+
+void mqttCallback(char *topic, byte *payload, unsigned int len) {
+  String t(topic);
+  String p;
+  p.reserve(len);
+  for (unsigned int i = 0; i < len; i++) p += (char)payload[i];
+
+  if (t == MQTT_DISCOVERY_PREFIX "/status") {        // HA neu gestartet
+    if (p == "online") mqttDiscoveryDue = true;
+    return;
+  }
+  if (t == baseTopic + "/open/set") {
+    startBuzzer();
+    aSip.Hangup();   // wie in der Weboberflaeche: Tuer auf -> Anruf beenden
+  } else if (t == baseTopic + "/callonring/set") {
+    callOnRing = (p == "ON");
+    saveSettings();
+  } else if (t == baseTopic + "/duration/set") {
+    int v = (int)p.toFloat();   // HA sendet Zahlen evtl. als "5.0"
+    if (v >= MIN_BUZZER_SECONDS && v <= MAX_BUZZER_SECONDS) {
+      buzzerSeconds = (uint8_t)v;
+      saveSettings();
+      displayDirty = true;
+    }
+  }
+  mqttStateDue = true;
+}
+
+// Broker-Einstellungen uebernehmen (Start und nach Aenderung im Web)
+void initMqtt() {
+  if (mqtt.connected()) {
+    mqtt.publish((baseTopic + "/status").c_str(), "offline", true);
+    mqtt.disconnect();
+  }
+  copyToField(mqttServerBuf, sizeof(mqttServerBuf), mqttServer);
+  mqtt.setServer(mqttServerBuf, mqttPort);
+  mqttRetryMs = 5000;
+  mqttLastTry = millis() - mqttRetryMs;   // sofort verbinden
+}
+
+void mqttLoop() {
+  if (mqttServerBuf[0] == 0) return;   // kein Broker eingestellt -> MQTT aus
+
+  if (!mqtt.connected()) {
+    // Verbindungsaufbau blockiert kurz -> nicht waehrend eines Anrufs
+    if (aSip.IsBusy() || WiFi.status() != WL_CONNECTED) return;
+    if (millis() - mqttLastTry < mqttRetryMs) return;
+    mqttLastTry = millis();
+
+    String will = baseTopic + "/status";
+    bool ok = mqtt.connect(devId.c_str(),
+                           mqttUser.length() ? mqttUser.c_str() : nullptr,
+                           mqttPw.length()   ? mqttPw.c_str()   : nullptr,
+                           will.c_str(), 0, true, "offline");
+    if (!ok) {
+      Serial.printf("MQTT: Verbindung fehlgeschlagen (rc=%d)\n", mqtt.state());
+      mqttRetryMs = min<uint32_t>(mqttRetryMs * 2, 60000);
+      return;
+    }
+    Serial.println(F("MQTT: verbunden"));
+    mqttRetryMs = 5000;
+    mqtt.publish(will.c_str(), "online", true);
+    mqtt.subscribe((baseTopic + "/+/set").c_str());
+    mqtt.subscribe(MQTT_DISCOVERY_PREFIX "/status");
+    mqttDiscoveryDue = true;
+  }
+
+  mqtt.loop();
+
+  if (mqttDiscoveryDue) {
+    mqttDiscoveryDue = false;
+    mqttPublishDiscovery();
+    mqttStateDue = true;
+  }
+
+  // Zustand bei Aenderung sofort, sonst alle 60 s senden. Vergleich nur alle
+  // 200 ms, damit nicht jede Loop einen String baut.
+  static uint32_t lastCheck = 0, lastSent = 0;
+  static String   lastState;
+  if (mqttStateDue || millis() - lastCheck > 200) {
+    lastCheck = millis();
+    String s = mqttStateJson();
+    if (mqttStateDue || s != lastState || millis() - lastSent > 60000) {
+      mqttStateDue = false;
+      if (mqtt.publish((baseTopic + "/state").c_str(), s.c_str(), true)) {
+        lastState = s;
+        lastSent  = millis();
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------
 //  Signal-Eingang (entprellt)
 // ------------------------------------------------------------
 void handleSignalInput() {
@@ -256,6 +467,7 @@ void handleSignalInput() {
         signalCount++;
         lastRingAt = millis();
         markActivity();
+        mqttRing();
         if (callOnRing) placeCall();
       }
       displayDirty = true;
@@ -270,158 +482,235 @@ const char PAGE_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html><html lang="de"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tueroeffner</title>
+<meta name="theme-color" content="#0f1115">
+<title>Türöffner</title>
 <style>
- :root{color-scheme:dark}
- body{font-family:system-ui,sans-serif;margin:0;background:#111;color:#eee;
-      display:flex;min-height:100vh;align-items:center;justify-content:center}
- .card{background:#1c1c1e;padding:24px;border-radius:16px;width:320px;
-       box-shadow:0 8px 30px rgba(0,0,0,.5)}
- h1{font-size:20px;margin:0 0 16px}
- .row{display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:#aaa}
- .row b{color:#eee}
- button{width:100%;padding:16px;font-size:18px;border:0;border-radius:12px;
-        background:#0a84ff;color:#fff;cursor:pointer;margin-top:8px}
- button:active{background:#0060df}
- .open{background:#30d158}
- input{width:70px;padding:6px;border-radius:8px;border:1px solid #444;
-       background:#000;color:#eee;text-align:center}
- .status{margin:16px 0;padding:12px;border-radius:12px;background:#000}
- .on{color:#30d158}.off{color:#888}
- .bell{display:none;margin:0 0 16px;padding:16px;border-radius:12px;
-       background:#ff9f0a;color:#000;font-weight:700;text-align:center;font-size:18px}
- .bell.show{display:block;animation:blink 1s infinite}
- @keyframes blink{50%{opacity:.4}}
- .tabs{display:flex;gap:6px;margin-bottom:16px}
- .tabs button{margin:0;padding:10px;font-size:15px;background:#2c2c2e}
- .tabs button.active{background:#0a84ff}
- .tab{display:none}
- .tab.show{display:block}
- hr{border:0;border-top:1px solid #333;margin:18px 0}
+:root{--bg:#f2f3f7;--card:#fff;--tile:#f6f7fa;--fg:#15171c;--mut:#6b7280;--line:#e4e6eb;
+ --acc:#2563eb;--ok:#16a34a;--warn:#f59e0b;--bad:#dc2626;--sh:0 10px 30px rgba(15,17,21,.08)}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--tile:#1f232c;--fg:#eef0f4;
+ --mut:#8b93a1;--line:#2a2f3a;--acc:#3b82f6;--ok:#22c55e;--sh:0 10px 30px rgba(0,0,0,.4)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+ display:flex;justify-content:center;padding:24px 16px}
+.app{width:100%;max-width:400px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:22px;margin:0;letter-spacing:-.02em}
+.pill{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);background:var(--card);
+ padding:6px 10px;border-radius:99px;box-shadow:var(--sh)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.dot.off{background:var(--bad)}
+.card{background:var(--card);border-radius:20px;padding:20px;box-shadow:var(--sh);margin-bottom:14px}
+.seg{display:flex;background:var(--card);border-radius:14px;padding:4px;margin-bottom:14px;box-shadow:var(--sh)}
+.seg button{flex:1;border:0;background:none;color:var(--mut);padding:10px 4px;border-radius:10px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap}
+.seg button.active{background:var(--acc);color:#fff}
+.tab{display:none}.tab.show{display:block}
+.ringing .ring .bg{stroke:var(--warn);animation:glow 1.2s ease-in-out infinite}
+@keyframes glow{50%{opacity:.35}}
+.ringing .hint{color:var(--warn);font-size:17px;font-weight:700}
+.door{display:flex;flex-direction:column;align-items:center;padding:8px 0 4px}
+.ring{position:relative;width:170px;height:170px}
+.ring>svg{position:absolute;inset:0;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:8}
+.ring .bg{stroke:var(--line)}
+.ring .pr{stroke:var(--ok);stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490;transition:stroke-dashoffset .25s linear}
+.open{position:absolute;inset:16px;border:0;border-radius:50%;background:var(--ok);color:#fff;cursor:pointer;
+ font:inherit;font-size:17px;font-weight:700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+ box-shadow:0 8px 24px color-mix(in srgb,var(--ok) 40%,transparent);transition:transform .1s}
+.open:active{transform:scale(.95)}
+.open svg{width:38px;height:38px}
+.open.active{background:color-mix(in srgb,var(--ok) 80%,#000)}
+.hint{color:var(--mut);font-size:13px;margin-top:10px;height:24px;display:flex;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.tile{background:var(--tile);border-radius:14px;padding:10px 12px}
+.tile small{display:block;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.tile b{font-size:18px}
+.on{color:var(--ok)}.off{color:var(--mut)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.btn{border:0;border-radius:12px;padding:12px;font:inherit;font-weight:600;cursor:pointer;background:var(--tile);color:var(--fg)}
+.btn:active{opacity:.7}
+.btn.pri{background:var(--acc);color:#fff;width:100%;margin-top:14px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:0 0 12px}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
+input[type=text],input[type=number],input[type=password]{width:100%;padding:11px 12px;border-radius:10px;
+ border:1px solid var(--line);background:var(--tile);color:var(--fg);font:inherit}
+input:focus{outline:2px solid var(--acc);outline-offset:-1px}
+.two{display:grid;grid-template-columns:2fr 1fr;gap:8px}
+.sw{display:flex;align-items:center;justify-content:space-between;margin-top:14px}
+.sw input{appearance:none;width:46px;height:28px;border-radius:99px;background:var(--line);position:relative;cursor:pointer;transition:.2s;margin:0}
+.sw input::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.2s}
+.sw input:checked{background:var(--ok)}
+.sw input:checked::after{left:21px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,120px);background:var(--fg);color:var(--bg);
+ padding:12px 18px;border-radius:12px;font-weight:600;transition:transform .25s;box-shadow:var(--sh)}
+.toast.show{transform:translate(-50%,0)}
+.toast.err{background:var(--bad);color:#fff}
+.kv{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.kv span{color:var(--mut)}
+code{font:13px ui-monospace,Consolas,monospace;word-break:break-all}
+.note{color:var(--mut);font-size:13px;margin:12px 0 0}
 </style></head><body>
-<div class="card">
- <h1>Tueroeffner</h1>
- <div class="tabs">
-   <button id="tb0" class="active" onclick="tab(0)">Steuerung</button>
-   <button id="tb1" onclick="tab(1)">Konfiguration</button>
+<div class="app">
+ <header>
+  <h1>Türöffner</h1>
+  <div class="pill"><span class="dot" id="conn"></span><span id="connt">verbinde…</span></div>
+ </header>
+
+ <div class="seg">
+  <button id="tb0" class="active" onclick="tab(0)">Steuerung</button>
+  <button id="tb1" onclick="tab(1)">Einstellungen</button>
+  <button id="tb2" onclick="tab(2)">Home Assistant</button>
  </div>
 
  <div id="t0" class="tab show">
-   <div class="bell" id="bell">&#128276; Es klingelt!</div>
-   <div class="status">
-     <div class="row">Signal <b id="sig">-</b></div>
-     <div class="row">Summer <b id="buz">-</b></div>
-     <div class="row">Klingel-Anzahl <b id="rings">-</b></div>
-     <div class="row">Ausloesungen <b id="cnt">-</b></div>
-     <div class="row">Anrufe <b id="calls">-</b></div>
-     <div class="row">SIP registriert <b id="reg">-</b></div>
+  <div class="card" id="doorc">
+   <div class="door">
+    <div class="ring">
+     <svg viewBox="0 0 170 170"><circle class="bg" cx="85" cy="85" r="78"/><circle class="pr" id="prog" cx="85" cy="85" r="78"/></svg>
+     <button class="open" id="openb" onclick="openDoor()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+      <span id="openl">Öffnen</span>
+     </button>
+    </div>
+    <div class="hint" id="hint">&nbsp;</div>
    </div>
-   <button class="open" onclick="openDoor()">Oeffnen</button>
-   <button id="snd" onclick="initAudio();beep()">&#128263; Ton aktivieren / testen</button>
-   <button onclick="testCall()">&#128222; Test-Anruf</button>
+  </div>
+
+  <div class="card">
+   <div class="grid">
+    <div class="tile"><small>Signal</small><b id="sig">–</b></div>
+    <div class="tile"><small>Summer</small><b id="buz">–</b></div>
+    <div class="tile"><small>SIP</small><b id="reg">–</b></div>
+    <div class="tile"><small>Klingeln</small><b id="rings">–</b></div>
+    <div class="tile"><small>Öffnungen</small><b id="cnt">–</b></div>
+    <div class="tile"><small>Anrufe</small><b id="calls">–</b></div>
+   </div>
+   <div class="row2">
+    <button class="btn" onclick="testCall()">📞 Test-Anruf</button>
+    <button class="btn" id="snd" onclick="initAudio();beep()">🔇 Ton testen</button>
+   </div>
+  </div>
  </div>
 
  <div id="t1" class="tab">
-   <div class="row"><span>Summer-Dauer</span>
-     <span><input id="dur" type="number" min="1" max="30"> s</span></div>
-   <button onclick="saveDur()">Dauer speichern</button>
-   <hr>
-   <div class="row"><span>Anruf-Ziel (Nebenstelle)</span>
-     <span><input id="dial" type="text" style="width:110px"></span></div>
-   <div class="row"><span>Bei Klingeln anrufen</span>
-     <span><input id="auto" type="checkbox"></span></div>
-   <button onclick="saveDial()">Anruf-Ziel speichern</button>
-   <hr>
-   <div class="row"><span>SIP-Server</span>
-     <span><input id="sipserver" type="text" style="width:130px"></span></div>
-   <div class="row"><span>SIP-Port</span>
-     <span><input id="sipport" type="number" min="1" max="65535"></span></div>
-   <div class="row"><span>SIP-Benutzer</span>
-     <span><input id="sipuser" type="text" style="width:130px"></span></div>
-   <div class="row"><span>SIP-Passwort</span>
-     <span><input id="sippw" type="password" style="width:130px" placeholder="unveraendert"></span></div>
-   <button onclick="saveSip()">SIP-Daten speichern</button>
+  <div class="card">
+   <h2>Türsummer</h2>
+   <label for="dur">Summer-Dauer (Sekunden)</label>
+   <input id="dur" type="number" min="1" max="30">
+   <button class="btn pri" onclick="saveDur()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Anruf beim Klingeln</h2>
+   <label for="dial">Ziel (Nebenstelle)</label>
+   <input id="dial" type="text" inputmode="tel">
+   <div class="sw"><span>Beim Klingeln anrufen</span><input id="auto" type="checkbox"></div>
+   <button class="btn pri" onclick="saveDial()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>SIP-Zugang</h2>
+   <div class="two">
+    <div><label for="sipserver">Server</label><input id="sipserver" type="text"></div>
+    <div><label for="sipport">Port</label><input id="sipport" type="number" min="1" max="65535"></div>
+   </div>
+   <label for="sipuser">Benutzer</label>
+   <input id="sipuser" type="text" autocomplete="off">
+   <label for="sippw">Passwort</label>
+   <input id="sippw" type="password" placeholder="unverändert" autocomplete="new-password">
+   <button class="btn pri" onclick="saveSip()">Speichern &amp; neu registrieren</button>
+  </div>
+ </div>
+
+ <div id="t2" class="tab">
+  <div class="card">
+   <h2>MQTT-Broker <b id="mqst" class="off" style="float:right;text-transform:none">–</b></h2>
+   <div class="two">
+    <div><label for="mqserver">Broker</label><input id="mqserver" type="text" placeholder="leer = aus"></div>
+    <div><label for="mqport">Port</label><input id="mqport" type="number" min="1" max="65535"></div>
+   </div>
+   <label for="mquser">Benutzer</label>
+   <input id="mquser" type="text" autocomplete="off">
+   <label for="mqpw">Passwort</label>
+   <input id="mqpw" type="password" placeholder="unverändert" autocomplete="new-password">
+   <button class="btn pri" onclick="saveMqtt()">Speichern &amp; verbinden</button>
+  </div>
+  <div class="card">
+   <h2>Gerät</h2>
+   <div class="kv"><span>Geräte-ID</span><code id="mqid">–</code></div>
+   <div class="kv"><span>Basis-Topic</span><code id="mqbase">–</code></div>
+   <p class="note">Das Gerät erscheint automatisch unter <b>Einstellungen → Geräte &amp; Dienste → MQTT</b>
+   mit „Tür öffnen“, „Klingel“ (Ereignis für Automationen), Summer, SIP-Status und Zählern.
+   Voraussetzung: Mosquitto-Add-on und MQTT-Integration.</p>
+  </div>
  </div>
 </div>
+<div class="toast" id="toast"></div>
 <script>
-let audioCtx=null, soundOn=false, wasRinging=false;
-function tab(n){
-  for(let i=0;i<2;i++){
-    document.getElementById('t'+i).className=i==n?'tab show':'tab';
-    document.getElementById('tb'+i).className=i==n?'active':'';
-  }
-}
+let audioCtx=null,soundOn=false,wasRinging=false,buzEnd=0,buzDur=1,tt;
+const $=id=>document.getElementById(id);
+function tab(n){for(let i=0;i<3;i++){$('t'+i).className=i==n?'tab show':'tab';$('tb'+i).className=i==n?'active':'';}}
+function toast(msg,err){const t=$('toast');t.textContent=msg;t.className='toast show'+(err?' err':'');
+ clearTimeout(tt);tt=setTimeout(()=>t.className='toast'+(err?' err':''),2500);}
 function initAudio(){
-  if(!audioCtx){audioCtx=new (window.AudioContext||window.webkitAudioContext)();}
-  if(audioCtx.state==='suspended')audioCtx.resume();
-  soundOn=true;
-  document.getElementById('snd').textContent='\uD83D\uDD0A Ton an';
+ if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+ if(audioCtx.state==='suspended')audioCtx.resume();
+ soundOn=true;$('snd').textContent='🔊 Ton an';
 }
 function beep(){
-  if(!audioCtx)return;
-  const t=audioCtx.currentTime;
-  for(let i=0;i<3;i++){
-    const o=audioCtx.createOscillator(),g=audioCtx.createGain();
-    o.type='square';o.frequency.value=880;
-    o.connect(g);g.connect(audioCtx.destination);
-    const s=t+i*0.35;
-    g.gain.setValueAtTime(0.001,s);
-    g.gain.exponentialRampToValueAtTime(0.3,s+0.02);
-    g.gain.exponentialRampToValueAtTime(0.001,s+0.25);
-    o.start(s);o.stop(s+0.26);
-  }
+ if(!audioCtx)return;const t=audioCtx.currentTime;
+ for(let i=0;i<3;i++){const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='square';o.frequency.value=880;o.connect(g);g.connect(audioCtx.destination);
+  const s=t+i*.35;g.gain.setValueAtTime(.001,s);g.gain.exponentialRampToValueAtTime(.3,s+.02);
+  g.gain.exponentialRampToValueAtTime(.001,s+.25);o.start(s);o.stop(s+.26);}
 }
 document.addEventListener('click',initAudio,{once:true});
+function setVal(id,v){const e=$(id);if(document.activeElement!==e)e.value=v;}
+function flag(id,on,a,b){const e=$(id);e.textContent=on?a:b;e.className=on?'on':'off';}
+async function post(url,okMsg){
+ try{const r=await fetch(url,{method:'POST'});let j={};try{j=await r.json();}catch(e){}
+  if(r.ok){if(okMsg)toast(okMsg);}else toast(j.err||'Fehler',true);}
+ catch(e){toast('Keine Verbindung',true);}
+ refresh();
+}
+function anim(){
+ const left=Math.max(0,buzEnd-Date.now()),f=left/(buzDur*1000);
+ $('prog').style.strokeDashoffset=490*(1-f);
+ const act=left>0;$('openb').className=act?'open active':'open';
+ $('openl').textContent=act?Math.ceil(left/1000)+' s':'Öffnen';
+ if(act)requestAnimationFrame(anim);
+}
 async function refresh(){
-  try{
-    const r=await fetch('/status');const s=await r.json();
-    document.getElementById('sig').textContent=s.signal?'AKTIV':'ruhig';
-    document.getElementById('sig').className=s.signal?'on':'off';
-    document.getElementById('buz').textContent=s.buzzer?'AN':'aus';
-    document.getElementById('buz').className=s.buzzer?'on':'off';
-    document.getElementById('rings').textContent=s.signals;
-    document.getElementById('cnt').textContent=s.triggers;
-    document.getElementById('calls').textContent=s.calls;
-    document.getElementById('reg').textContent=s.registered?'JA':'nein';
-    document.getElementById('reg').className=s.registered?'on':'off';
-    document.getElementById('bell').className=s.ringing?'bell show':'bell';
-    if(s.ringing && !wasRinging && soundOn)beep();
-    wasRinging=s.ringing;
-    const d=document.getElementById('dur');
-    if(document.activeElement!==d)d.value=s.seconds;
-    const dl=document.getElementById('dial');
-    if(document.activeElement!==dl)dl.value=s.dial;
-    const au=document.getElementById('auto');
-    if(document.activeElement!==au)au.checked=s.callonring;
-    const ss=document.getElementById('sipserver');
-    if(document.activeElement!==ss)ss.value=s.sipserver;
-    const sp=document.getElementById('sipport');
-    if(document.activeElement!==sp)sp.value=s.sipport;
-    const su=document.getElementById('sipuser');
-    if(document.activeElement!==su)su.value=s.sipuser;
-    const pw=document.getElementById('sippw');
-    pw.placeholder=s.haspw?'unveraendert':'nicht gesetzt';
-  }catch(e){}
+ try{
+  const s=await(await fetch('/status')).json();
+  $('conn').className='dot on';$('connt').textContent='online';
+  flag('sig',s.signal,'aktiv','ruhig');flag('buz',s.buzzer,'an','aus');flag('reg',s.registered,'ok','nein');
+  $('rings').textContent=s.signals;$('cnt').textContent=s.triggers;$('calls').textContent=s.calls;
+  $('doorc').className=s.ringing?'card ringing':'card';
+  if(s.ringing&&!wasRinging&&soundOn)beep();wasRinging=s.ringing;
+  buzDur=s.seconds;
+  if(s.buzzer&&buzEnd<Date.now()){buzEnd=Date.now()+s.seconds*1000;anim();}
+  if(!s.buzzer&&buzEnd>Date.now()){buzEnd=0;anim();}
+  $('hint').textContent=s.ringing?'🔔 Es klingelt!':s.dial?(s.callonring?'Klingeln ruft '+s.dial+' an – * am Telefon öffnet':'Anruf beim Klingeln ist aus'):'Keine Zielnummer eingestellt';
+  setVal('dur',s.seconds);setVal('dial',s.dial);
+  if(document.activeElement!==$('auto'))$('auto').checked=s.callonring;
+  setVal('sipserver',s.sipserver);setVal('sipport',s.sipport);setVal('sipuser',s.sipuser);
+  $('sippw').placeholder=s.haspw?'unverändert':'nicht gesetzt';
+  setVal('mqserver',s.mqttserver);setVal('mqport',s.mqttport);setVal('mquser',s.mqttuser);
+  $('mqpw').placeholder=s.hasmqttpw?'unverändert':'nicht gesetzt';
+  $('mqid').textContent=s.mqttid;$('mqbase').textContent=s.mqttbase;
+  if(s.mqttserver)flag('mqst',s.mqtt,'verbunden','getrennt');else{$('mqst').textContent='aus';$('mqst').className='off';}
+ }catch(e){$('conn').className='dot off';$('connt').textContent='offline';}
 }
-async function openDoor(){await fetch('/open',{method:'POST'});refresh();}
-async function saveDur(){
-  const v=document.getElementById('dur').value;
-  await fetch('/setduration?s='+v,{method:'POST'});refresh();
+function openDoor(){buzEnd=Date.now()+buzDur*1000;anim();post('/open','Tür wird geöffnet');}
+function saveDur(){post('/setduration?s='+$('dur').value,'Gespeichert');}
+function saveDial(){post('/setdial?nr='+encodeURIComponent($('dial').value)+'&auto='+($('auto').checked?'1':'0'),'Gespeichert');}
+function testCall(){post('/call','Anruf wird aufgebaut');}
+function saveSip(){
+ const q=new URLSearchParams({server:$('sipserver').value,port:$('sipport').value,user:$('sipuser').value,pw:$('sippw').value});
+ $('sippw').value='';post('/setsip?'+q,'Gespeichert – registriere neu');
 }
-async function saveDial(){
-  const nr=encodeURIComponent(document.getElementById('dial').value);
-  const au=document.getElementById('auto').checked?'1':'0';
-  await fetch('/setdial?nr='+nr+'&auto='+au,{method:'POST'});refresh();
-}
-async function testCall(){await fetch('/call',{method:'POST'});refresh();}
-async function saveSip(){
-  const q=new URLSearchParams();
-  q.set('server',document.getElementById('sipserver').value);
-  q.set('port',document.getElementById('sipport').value);
-  q.set('user',document.getElementById('sipuser').value);
-  q.set('pw',document.getElementById('sippw').value);
-  await fetch('/setsip?'+q.toString(),{method:'POST'});
-  document.getElementById('sippw').value='';refresh();
+function saveMqtt(){
+ const q=new URLSearchParams({server:$('mqserver').value,port:$('mqport').value,user:$('mquser').value,pw:$('mqpw').value});
+ $('mqpw').value='';post('/setmqtt?'+q,'Gespeichert – verbinde');
 }
 setInterval(refresh,1000);refresh();
 </script>
@@ -429,14 +718,13 @@ setInterval(refresh,1000);refresh();
 )HTML";
 
 void handleRoot() {
-  server.send_P(200, "text/html", PAGE_HTML);
+  server.send_P(200, "text/html; charset=utf-8", PAGE_HTML);
 }
 
 void handleStatus() {
-  bool ringing = (millis() - lastRingAt) < RING_NOTIFY_MS && lastRingAt != 0;
   String json = "{";
   json += "\"signal\":"   + String(signalActive ? "true" : "false");
-  json += ",\"ringing\":" + String(ringing ? "true" : "false");
+  json += ",\"ringing\":" + String(isRinging() ? "true" : "false");
   json += ",\"buzzer\":"  + String(buzzerActive ? "true" : "false");
   json += ",\"seconds\":" + String(buzzerSeconds);
   json += ",\"triggers\":" + String(buzzerTriggers);
@@ -449,12 +737,20 @@ void handleStatus() {
   json += ",\"sipuser\":\"" + sipUser + "\"";
   json += ",\"haspw\":"    + String(sipPw.length() > 0 ? "true" : "false");
   json += ",\"registered\":" + String(aSip.IsRegistered() ? "true" : "false");
+  json += ",\"mqttserver\":\"" + mqttServer + "\"";
+  json += ",\"mqttport\":"  + String(mqttPort);
+  json += ",\"mqttuser\":\"" + mqttUser + "\"";
+  json += ",\"hasmqttpw\":" + String(mqttPw.length() > 0 ? "true" : "false");
+  json += ",\"mqtt\":"      + String(mqtt.connected() ? "true" : "false");
+  json += ",\"mqttid\":\""  + devId + "\"";
+  json += ",\"mqttbase\":\"" + baseTopic + "\"";
   json += "}";
   server.send(200, "application/json", json);
 }
 
 void handleOpen() {
   startBuzzer();
+  aSip.Hangup();   // Tuer ist auf -> laufenden Anruf beenden (klingelnd: CANCEL, sonst BYE)
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -473,9 +769,13 @@ void handleSetDuration() {
 }
 
 void handleCall() {
+  if (dialNr.length() == 0) {
+    server.send(400, "application/json", "{\"ok\":false,\"err\":\"keine Zielnummer\"}");
+    return;
+  }
   bool ok = placeCall();
-  server.send(ok ? 200 : 400, "application/json",
-              ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":\"keine Zielnummer\"}");
+  server.send(ok ? 200 : 409, "application/json",
+              ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":\"Anruf laeuft bereits\"}");
 }
 
 void handleSetDial() {
@@ -506,11 +806,30 @@ void handleSetSip() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+void handleSetMqtt() {
+  if (server.hasArg("server")) {
+    String s = server.arg("server");
+    s.trim();
+    if (s.length() < sizeof(mqttServerBuf)) mqttServer = s;
+  }
+  if (server.hasArg("port")) {
+    int p = server.arg("port").toInt();
+    if (p > 0 && p <= 65535) mqttPort = (uint16_t)p;
+  }
+  if (server.hasArg("user")) mqttUser = server.arg("user");
+  // Passwort nur uebernehmen, wenn ein neues angegeben wurde
+  if (server.hasArg("pw") && server.arg("pw").length() > 0) mqttPw = server.arg("pw");
+  saveSettings();
+  initMqtt();   // Verbindung mit neuen Daten aufbauen (in mqttLoop)
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 // ------------------------------------------------------------
 //  Setup / Loop
 // ------------------------------------------------------------
 // Wird aufgerufen, sobald das WLAN-Konfig-Portal (AP) startet.
 void configModeCallback(WiFiManager *wm) {
+  if (!hasDisplay) return;
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
@@ -552,13 +871,12 @@ void setup() {
     }
   }
   if (foundAddr == 0) {
+    // Ohne OLED alle Display-Zugriffe weglassen (spart I2C-Zeit in der Loop)
     Serial.println(F("  Kein OLED gefunden! (HW-364A: OLED an D5/D6)"));
-    foundAddr = OLED_ADDR;
-  }
-
-  if (!display.begin(SSD1306_SWITCHCAPVCC, foundAddr)) {
+  } else if (!display.begin(SSD1306_SWITCHCAPVCC, foundAddr)) {
     Serial.printf("SSD1306 Init fehlgeschlagen (Adresse 0x%02X)!\n", foundAddr);
   } else {
+    hasDisplay = true;
     Serial.printf("Display OK auf 0x%02X\n", foundAddr);
     display.clearDisplay();
     display.setTextSize(1);
@@ -596,32 +914,59 @@ void setup() {
   server.on("/call", HTTP_POST, handleCall);
   server.on("/setdial", HTTP_POST, handleSetDial);
   server.on("/setsip", HTTP_POST, handleSetSip);
+  server.on("/setmqtt", HTTP_POST, handleSetMqtt);
   server.begin();
+
+  // Home Assistant / MQTT: eindeutige Kennung aus den letzten 3 MAC-Bytes
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  mac.toLowerCase();
+  devId     = "tueroeffner_" + mac.substring(6);
+  baseTopic = "tueroeffner/" + mac.substring(6);
+  mqttNet.setTimeout(MQTT_CONNECT_TIMEOUT_MS);
+  mqtt.setBufferSize(1024);     // Discovery-Nachrichten sind laenger als die 256-Byte-Voreinstellung
+  mqtt.setSocketTimeout(2);     // max. Wartezeit auf CONNACK (s)
+  mqtt.setCallback(mqttCallback);
+  initMqtt();
 
   lastActivityAt = millis();
   displayDirty = true;
 }
 
+void updateDisplay();
+
 void loop() {
   server.handleClient();
   aSip.Processing(acSipIn, sizeof(acSipIn));
   handleSignalInput();
+  mqttLoop();
 
-  // DTMF vom Telefon: '*' oeffnet die Tuer (loest den Summer aus)
+  // DTMF vom Telefon: '*' oeffnet die Tuer (loest den Summer aus) und legt auf
   char dtmf = aSip.ReadDtmf();
   if (dtmf) Serial.printf("DTMF empfangen: %c\n", dtmf);
-  if (dtmf == '*') startBuzzer();
+  if (dtmf == '*') {
+    startBuzzer();
+    aSip.Hangup();
+  }
 
-  // SIP-Registrierung rechtzeitig erneuern
-  if (millis() - lastRegisterAt > (uint32_t)(SIP_REG_EXPIRES - 30) * 1000UL) {
+  // SIP-Registrierung rechtzeitig erneuern (laeuft nebenher ueber Processing).
+  // Ist sie fehlgeschlagen, schon nach SIP_REG_RETRY_SEC erneut versuchen.
+  uint32_t regInterval = aSip.IsRegistered() ? (uint32_t)(SIP_REG_EXPIRES - 30) * 1000UL
+                                             : (uint32_t)SIP_REG_RETRY_SEC * 1000UL;
+  if (!aSip.IsRegistering() && millis() - lastRegisterAt > regInterval) {
     lastRegisterAt = millis();
-    aSip.Register(SIP_REG_EXPIRES);
+    aSip.StartRegister(SIP_REG_EXPIRES);
   }
 
   if (buzzerActive && (int32_t)(millis() - buzzerOffAt) >= 0) {
     stopBuzzer();
   }
 
+  if (hasDisplay) updateDisplay();
+}
+
+// Display nur neu zeichnen, wenn sich etwas Sichtbares geaendert hat
+void updateDisplay() {
   // Bildschirmschoner: OLED nach Inaktivitaet ausschalten
   if (SCREEN_TIMEOUT_SECONDS > 0 && displayOn &&
       (millis() - lastActivityAt) > (uint32_t)SCREEN_TIMEOUT_SECONDS * 1000UL) {
@@ -631,14 +976,21 @@ void loop() {
     displayOn = false;
   }
 
-  // Display regelmaessig auffrischen, damit der Klingel-Hinweis von selbst verschwindet
-  static uint32_t lastDraw = 0;
-  if (displayOn && millis() - lastDraw > 500) {
-    lastDraw = millis();
+  // Zustaende, die sich ohne eigenes Ereignis aendern: Ablauf des
+  // Klingel-Hinweises und WLAN-Verbindung
+  static bool lastRinging = false;
+  static bool lastWifi    = false;
+  bool ringing = isRinging();
+  bool wifi    = WiFi.status() == WL_CONNECTED;
+  if (ringing != lastRinging || wifi != lastWifi) {
+    lastRinging  = ringing;
+    lastWifi     = wifi;
     displayDirty = true;
   }
 
-  if (displayOn && displayDirty) {
+  // Nicht waehrend eines Anrufs zeichnen: das I2C-Update blockiert und
+  // stoert den RTP-Takt. displayDirty bleibt gesetzt -> wird danach nachgeholt.
+  if (displayOn && displayDirty && !aSip.IsBusy()) {
     displayDirty = false;
     drawDisplay();
   }
