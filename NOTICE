@@ -1,0 +1,13 @@
+ESP Türöffner
+Copyright 2026 Daniel Jörg Schuppelius
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party software:
+
+  lib/ArduinoSIP
+    Copyright (c) 2018 Juergen Liegner
+    Copyright (c) 2019 Thorsten Godau (dl9sec)
+    Licensed under the BSD 3-Clause License (see the header of
+    lib/ArduinoSIP/ArduinoSIP.h). Extended for this project
+    (REGISTER, RTP beep, DTMF, CANCEL/BYE handling).

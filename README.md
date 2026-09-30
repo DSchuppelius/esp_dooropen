@@ -83,3 +83,9 @@ mit `board_upload.before_reset = no_reset` dafür vorbereitet.
 ## Anpassen
 
 Alle Pins und Grundeinstellungen stehen in [src/config.h](src/config.h).
+## Lizenz
+
+Dieses Projekt steht unter der [Apache License 2.0](LICENSE).
+Die mitgelieferte Bibliothek [lib/ArduinoSIP](lib/ArduinoSIP) stammt von
+Juergen Liegner und Thorsten Godau und steht weiterhin unter der BSD-3-Clause-Lizenz
+(siehe [NOTICE](NOTICE) und den Kopf von `ArduinoSIP.h`).
