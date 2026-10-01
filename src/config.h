@@ -20,6 +20,10 @@
 // Kontakt schliesst gegen GND -> gedrueckt = LOW.
 #define SIGNAL_ACTIVE_LOW true
 
+// Taster (je eine Ader an den Pin, die andere an GND; gedrueckt = LOW)
+#define PIN_BTN_RING   32   // GPIO32: Klingel-Taster (wirkt wie das Klingelsignal)
+#define PIN_BTN_BUZZER 33   // GPIO33: Summer-Taster (oeffnet die Tuer)
+
 // Onboard-LED (GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
 #define PIN_STATUS_LED    2       // GPIO2 (Onboard-LED, active-high)
 #define STATUS_LED_ACTIVE_LOW false
@@ -42,6 +46,11 @@
 // Kontakt schliesst gegen GND -> gedrueckt = LOW.
 #define SIGNAL_ACTIVE_LOW true
 
+// Taster (je eine Ader an den Pin, die andere an GND; gedrueckt = LOW)
+#define PIN_BTN_RING   D7   // GPIO13: Klingel-Taster (wirkt wie das Klingelsignal)
+// GPIO0 ist Boot-Pin: beim Einschalten NICHT gedrueckt halten (sonst Flash-Modus)
+#define PIN_BTN_BUZZER D3   // GPIO0:  Summer-Taster (oeffnet die Tuer)
+
 // Onboard-LED (blaue LED, GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
 #define PIN_STATUS_LED    LED_BUILTIN
 #define STATUS_LED_ACTIVE_LOW true
@@ -61,6 +70,9 @@
 #define MIN_BUZZER_SECONDS       1
 #define MAX_BUZZER_SECONDS       30
 #define SIGNAL_DEBOUNCE_MS       50
+// Weboberflaeche: "Signal aktiv" nach dem Loslassen noch so lange zeigen (ms),
+// sonst verpasst die 1-s-Abfrage kurze Tastendruecke
+#define SIGNAL_HOLD_MS           3000
 // Wie lange "Es klingelt" nach dem Tastendruck angezeigt bleibt (ms)
 #define RING_NOTIFY_MS           10000
 #define WIFI_AP_NAME             "Tueroeffner-Setup"

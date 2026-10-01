@@ -75,6 +75,7 @@ bool     lastSignalRaw     = false;
 uint32_t lastSignalChange  = 0;
 uint32_t signalCount       = 0;
 uint32_t lastRingAt        = 0;      // millis des letzten Klingelns
+uint32_t lastSignalOffAt   = 0;      // millis, als das Signal zuletzt endete
 bool     hasDisplay        = false;  // OLED beim I2C-Scan gefunden?
 bool     displayDirty      = true;
 uint32_t lastActivityAt    = 0;      // fuer Bildschirmschoner
@@ -451,9 +452,11 @@ void mqttLoop() {
 // ------------------------------------------------------------
 //  Signal-Eingang (entprellt)
 // ------------------------------------------------------------
+// Klingel-Taster wirkt wie ein zweiter Kontakt parallel zum Klingelsignal
 void handleSignalInput() {
   int raw = digitalRead(PIN_SIGNAL);
-  bool pressed = SIGNAL_ACTIVE_LOW ? (raw == LOW) : (raw == HIGH);
+  bool pressed = (SIGNAL_ACTIVE_LOW ? (raw == LOW) : (raw == HIGH)) ||
+                 digitalRead(PIN_BTN_RING) == LOW;
 
   if (pressed != lastSignalRaw) {
     lastSignalRaw    = pressed;
@@ -469,8 +472,29 @@ void handleSignalInput() {
         markActivity();
         mqttRing();
         if (callOnRing) placeCall();
+      } else {
+        lastSignalOffAt = millis();
       }
       displayDirty = true;
+    }
+  }
+}
+
+// Summer-Taster (entprellt): jeder Druck oeffnet wie der Web-Button
+void handleBuzzerButton() {
+  static bool     lastRaw   = false;
+  static bool     state     = false;
+  static uint32_t changedAt = 0;
+  bool pressed = digitalRead(PIN_BTN_BUZZER) == LOW;
+  if (pressed != lastRaw) {
+    lastRaw   = pressed;
+    changedAt = millis();
+  }
+  if ((millis() - changedAt) > SIGNAL_DEBOUNCE_MS && pressed != state) {
+    state = pressed;
+    if (state) {
+      startBuzzer();
+      aSip.Hangup();   // Tuer ist auf -> laufenden Anruf beenden
     }
   }
 }
@@ -535,6 +559,8 @@ label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
 input[type=text],input[type=number],input[type=password]{width:100%;padding:11px 12px;border-radius:10px;
  border:1px solid var(--line);background:var(--tile);color:var(--fg);font:inherit}
 input:focus{outline:2px solid var(--acc);outline-offset:-1px}
+input.dirty{border-color:var(--warn)}
+.btn.pri.due{box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 55%,transparent)}
 .two{display:grid;grid-template-columns:2fr 1fr;gap:8px}
 .sw{display:flex;align-items:center;justify-content:space-between;margin-top:14px}
 .sw input{appearance:none;width:46px;height:28px;border-radius:99px;background:var(--line);position:relative;cursor:pointer;transition:.2s;margin:0}
@@ -594,17 +620,13 @@ code{font:13px ui-monospace,Consolas,monospace;word-break:break-all}
 
  <div id="t1" class="tab">
   <div class="card">
-   <h2>Türsummer</h2>
+   <h2>Türsummer &amp; Anruf</h2>
    <label for="dur">Summer-Dauer (Sekunden)</label>
    <input id="dur" type="number" min="1" max="30">
-   <button class="btn pri" onclick="saveDur()">Speichern</button>
-  </div>
-  <div class="card">
-   <h2>Anruf beim Klingeln</h2>
-   <label for="dial">Ziel (Nebenstelle)</label>
+   <label for="dial">Anruf beim Klingeln an (Nebenstelle)</label>
    <input id="dial" type="text" inputmode="tel">
    <div class="sw"><span>Beim Klingeln anrufen</span><input id="auto" type="checkbox"></div>
-   <button class="btn pri" onclick="saveDial()">Speichern</button>
+   <button class="btn pri" onclick="saveGeneral()">Speichern</button>
   </div>
   <div class="card">
    <h2>SIP-Zugang</h2>
@@ -663,11 +685,23 @@ function beep(){
   g.gain.exponentialRampToValueAtTime(.001,s+.25);o.start(s);o.stop(s+.26);}
 }
 document.addEventListener('click',initAudio,{once:true});
-function setVal(id,v){const e=$(id);if(document.activeElement!==e)e.value=v;}
+// Vom Nutzer geaenderte, noch nicht gespeicherte Felder: refresh() laesst sie in Ruhe
+const dirty=new Set();let gen=0;
+function markDirty(e){const c=e.target;if(!c.id||c.tagName!=='INPUT')return;
+ dirty.add(c.id);c.classList.add('dirty');const b=c.closest('.card').querySelector('.pri');if(b)b.classList.add('due');}
+document.addEventListener('input',markDirty);document.addEventListener('change',markDirty);
+// Enter in einem Feld = Speichern-Button der Karte
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.tagName==='INPUT'){
+ const b=e.target.closest('.card').querySelector('.pri');if(b){e.preventDefault();b.click();}}});
+function clean(ids){for(const id of ids){dirty.delete(id);const c=$(id);c.classList.remove('dirty');
+ const b=c.closest('.card').querySelector('.pri');if(b&&!c.closest('.card').querySelector('.dirty'))b.classList.remove('due');}}
+function setVal(id,v){const e=$(id);if(!dirty.has(id)&&document.activeElement!==e)e.value=v;}
+function setChk(id,v){const e=$(id);if(!dirty.has(id))e.checked=v;}
 function flag(id,on,a,b){const e=$(id);e.textContent=on?a:b;e.className=on?'on':'off';}
-async function post(url,okMsg){
+async function post(url,okMsg,ids){
+ gen++;   // laufende refresh()-Antworten mit alten Werten verwerfen
  try{const r=await fetch(url,{method:'POST'});let j={};try{j=await r.json();}catch(e){}
-  if(r.ok){if(okMsg)toast(okMsg);}else toast(j.err||'Fehler',true);}
+  if(r.ok){if(ids)clean(ids);if(okMsg)toast(okMsg);}else toast(j.err||'Fehler',true);}
  catch(e){toast('Keine Verbindung',true);}
  refresh();
 }
@@ -680,7 +714,9 @@ function anim(){
 }
 async function refresh(){
  try{
+  const g=gen;
   const s=await(await fetch('/status')).json();
+  if(g!==gen)return;   // waehrenddessen gespeichert -> Antwort ist veraltet
   $('conn').className='dot on';$('connt').textContent='online';
   flag('sig',s.signal,'aktiv','ruhig');flag('buz',s.buzzer,'an','aus');flag('reg',s.registered,'ok','nein');
   $('rings').textContent=s.signals;$('cnt').textContent=s.triggers;$('calls').textContent=s.calls;
@@ -691,7 +727,7 @@ async function refresh(){
   if(!s.buzzer&&buzEnd>Date.now()){buzEnd=0;anim();}
   $('hint').textContent=s.ringing?'🔔 Es klingelt!':s.dial?(s.callonring?'Klingeln ruft '+s.dial+' an – * am Telefon öffnet':'Anruf beim Klingeln ist aus'):'Keine Zielnummer eingestellt';
   setVal('dur',s.seconds);setVal('dial',s.dial);
-  if(document.activeElement!==$('auto'))$('auto').checked=s.callonring;
+  setChk('auto',s.callonring);
   setVal('sipserver',s.sipserver);setVal('sipport',s.sipport);setVal('sipuser',s.sipuser);
   $('sippw').placeholder=s.haspw?'unverändert':'nicht gesetzt';
   setVal('mqserver',s.mqttserver);setVal('mqport',s.mqttport);setVal('mquser',s.mqttuser);
@@ -701,16 +737,18 @@ async function refresh(){
  }catch(e){$('conn').className='dot off';$('connt').textContent='offline';}
 }
 function openDoor(){buzEnd=Date.now()+buzDur*1000;anim();post('/open','Tür wird geöffnet');}
-function saveDur(){post('/setduration?s='+$('dur').value,'Gespeichert');}
-function saveDial(){post('/setdial?nr='+encodeURIComponent($('dial').value)+'&auto='+($('auto').checked?'1':'0'),'Gespeichert');}
+function saveGeneral(){
+ const q=new URLSearchParams({s:$('dur').value,nr:$('dial').value,auto:$('auto').checked?'1':'0'});
+ post('/setdial?'+q,'Gespeichert',['dur','dial','auto']);
+}
 function testCall(){post('/call','Anruf wird aufgebaut');}
 function saveSip(){
  const q=new URLSearchParams({server:$('sipserver').value,port:$('sipport').value,user:$('sipuser').value,pw:$('sippw').value});
- $('sippw').value='';post('/setsip?'+q,'Gespeichert – registriere neu');
+ $('sippw').value='';post('/setsip?'+q,'Gespeichert – registriere neu',['sipserver','sipport','sipuser','sippw']);
 }
 function saveMqtt(){
  const q=new URLSearchParams({server:$('mqserver').value,port:$('mqport').value,user:$('mquser').value,pw:$('mqpw').value});
- $('mqpw').value='';post('/setmqtt?'+q,'Gespeichert – verbinde');
+ $('mqpw').value='';post('/setmqtt?'+q,'Gespeichert – verbinde',['mqserver','mqport','mquser','mqpw']);
 }
 setInterval(refresh,1000);refresh();
 </script>
@@ -723,7 +761,10 @@ void handleRoot() {
 
 void handleStatus() {
   String json = "{";
-  json += "\"signal\":"   + String(signalActive ? "true" : "false");
+  // Kurze Tastendruecke etwas nachhalten, damit die 1-s-Abfrage sie sieht
+  bool sigShown = signalActive ||
+                  (lastSignalOffAt != 0 && millis() - lastSignalOffAt < SIGNAL_HOLD_MS);
+  json += "\"signal\":"   + String(sigShown ? "true" : "false");
   json += ",\"ringing\":" + String(isRinging() ? "true" : "false");
   json += ",\"buzzer\":"  + String(buzzerActive ? "true" : "false");
   json += ",\"seconds\":" + String(buzzerSeconds);
@@ -778,18 +819,27 @@ void handleCall() {
               ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":\"Anruf laeuft bereits\"}");
 }
 
+// Zielnummer + Anruf-Schalter, optional auch die Summer-Dauer ("s").
+// Erst alles pruefen, dann uebernehmen -> bei Fehler bleibt alles unveraendert.
 void handleSetDial() {
-  if (server.hasArg("nr")) {
-    String nr = server.arg("nr");
-    if (nr.length() <= MAX_DIAL_LEN) {
-      dialNr = nr;
-      if (server.hasArg("auto")) callOnRing = server.arg("auto") == "1";
-      saveSettings();
-      server.send(200, "application/json", "{\"ok\":true}");
+  if (!server.hasArg("nr") || server.arg("nr").length() > MAX_DIAL_LEN) {
+    server.send(400, "application/json", "{\"ok\":false,\"err\":\"Zielnummer zu lang\"}");
+    return;
+  }
+  int dur = buzzerSeconds;
+  if (server.hasArg("s")) {
+    dur = server.arg("s").toInt();
+    if (dur < MIN_BUZZER_SECONDS || dur > MAX_BUZZER_SECONDS) {
+      server.send(400, "application/json", "{\"ok\":false,\"err\":\"Summer-Dauer ungueltig\"}");
       return;
     }
   }
-  server.send(400, "application/json", "{\"ok\":false}");
+  dialNr = server.arg("nr");
+  if (server.hasArg("auto")) callOnRing = server.arg("auto") == "1";
+  buzzerSeconds = (uint8_t)dur;
+  saveSettings();
+  displayDirty = true;
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleSetSip() {
@@ -855,6 +905,8 @@ void setup() {
   pinMode(PIN_STATUS_LED, OUTPUT);
   setRelay(false);
   pinMode(PIN_SIGNAL, INPUT_PULLUP);
+  pinMode(PIN_BTN_RING, INPUT_PULLUP);
+  pinMode(PIN_BTN_BUZZER, INPUT_PULLUP);
 
   loadSettings();
 
@@ -939,6 +991,7 @@ void loop() {
   server.handleClient();
   aSip.Processing(acSipIn, sizeof(acSipIn));
   handleSignalInput();
+  handleBuzzerButton();
   mqttLoop();
 
   // DTMF vom Telefon: '*' oeffnet die Tuer (loest den Summer aus) und legt auf

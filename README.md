@@ -39,6 +39,8 @@ Hier gelten echte GPIO-Nummern. Ein OLED ist optional.
 | Relais S (Signal)    | GPIO26   | schaltet das Relais (active-high)        |
 | Relais + / -         | 5V / GND | Relais-Modul aus 5 V versorgen           |
 | Klingel-Kontakt      | GPIO27   | eine Ader hier, andere Ader an GND       |
+| Klingel-Taster       | GPIO32   | Taster gegen GND, wirkt wie Klingeln     |
+| Summer-Taster        | GPIO33   | Taster gegen GND, öffnet die Tür         |
 | Status-LED (onboard) | GPIO2    | spiegelt den Summer-Zustand              |
 | OLED SDA (optional)  | GPIO21   | nur falls ein Display genutzt wird       |
 | OLED SCL (optional)  | GPIO22   | nur falls ein Display genutzt wird       |
@@ -55,6 +57,8 @@ Das OLED ist auf dem HW-364A **fest verdrahtet** an D5/D6.
 | KY-019 + (VCC)      | 5V / VU     | 5 V vom USB-Pin (nicht 3V3!)             |
 | KY-019 - (GND)      | G           | gemeinsame Masse                         |
 | Klingel-Kontakt     | D2 (GPIO4)  | eine Ader hier, andere Ader an GND       |
+| Klingel-Taster      | D7 (GPIO13) | Taster gegen GND, wirkt wie Klingeln     |
+| Summer-Taster       | D3 (GPIO0)  | gegen GND; Boot-Pin, nicht beim Start    |
 
 ### Türöffner und Klingel
 
