@@ -78,6 +78,7 @@ void Sip::Init(const char *SipIp, int SipPort, const char *MyIp, int MyPort, con
   iMaxTime = MaxDialSec * 1000;
   bRegistered = false;   // neue Zugangsdaten -> neu registrieren
   bRegPending = false;
+  iRegStatus = -1;
 }
 
 
@@ -129,6 +130,7 @@ void Sip::HandleRegisterResponse(const char *p) {
   {
     bRegistered = true;
     bRegPending = false;
+    iRegStatus  = 200;
     return;
   }
 
@@ -163,6 +165,7 @@ void Sip::HandleRegisterResponse(const char *p) {
   // Jede andere Endantwort (oder erneute Auth-Aufforderung) = fehlgeschlagen
   bRegistered = false;
   bRegPending = false;
+  iRegStatus  = atoi(p + 8);   // "SIP/2.0 403 ..." -> 403
 }
 
 
@@ -173,6 +176,8 @@ bool Sip::Dial(const char *DialNr, const char *DialDesc) {
 
   iDialRetries = 0;
   bAnswered = false;
+  eCallResult = CALL_NONE;
+  iCallCode = 0;
   pDialNr = DialNr;
   pDialDesc = DialDesc;
   Invite();
@@ -210,6 +215,7 @@ void Sip::Processing(char *pBuf, size_t lBuf) {
   {
     bRegPending = false;
     bRegistered = false;
+    iRegStatus  = 0;   // keine Antwort
   }
 
   HandleUdpPacket((packetSize > 0) ? pBuf : 0 );
@@ -220,9 +226,14 @@ void Sip::Processing(char *pBuf, size_t lBuf) {
 void Sip::HandleUdpPacket(const char *p) {
   
   uint32_t iWorkTime = iRingTime ? (Millis() - iRingTime) : 0;
-  
-  if ( iRingTime && iWorkTime > iMaxTime )
-    Hangup();   // nicht angenommen -> CANCEL, sonst BYE
+
+  // Klingelt zu lange -> CANCEL. Nach dem Abheben gilt die Gespraechsdauer;
+  // die beendet RtpProcessing(), hier nur die Absicherung ohne RTP-Strom.
+  if ( iRingTime && !bAnswered && iWorkTime > iMaxTime )
+    Hangup();
+  else if ( iRingTime && bAnswered && !bInCall
+            && (millis() - callAnsweredAt) > (uint32_t)TalkSeconds() * 1000UL )
+    Hangup();
 
   if ( !p )
   {
@@ -282,6 +293,8 @@ void Sip::HandleUdpPacket(const char *p) {
         return;
       }
       bAnswered = true;
+      eCallResult = CALL_ANSWERED;
+      callAnsweredAt = millis();
       // Anruf angenommen, Beep-Audio starten
       if ( iBeepSeconds > 0 && !bInCall )
         StartRtp(p);
@@ -294,12 +307,26 @@ void Sip::HandleUdpPacket(const char *p) {
     ParseReturnParams(p);
   }
   else if (    strstr(p, "SIP/2.0 486 ") == p 	// Busy Here
+            || strstr(p, "SIP/2.0 600 ") == p 	// Busy Everywhere
             || strstr(p, "SIP/2.0 603 ") == p 	// Decline
             || strstr(p, "SIP/2.0 487 ") == p) 	// Request Terminatet
   {
     Ack(p);
     StopCall();
     iRingTime = 0;
+    if ( strstr(p, "SIP/2.0 603 ") == p )      eCallResult = CALL_DECLINED;
+    else if ( strstr(p, "SIP/2.0 487 ") != p ) eCallResult = CALL_BUSY;
+    // 487 = Antwort auf unser CANCEL: Ergebnis hat Hangup() schon gesetzt
+  }
+  else if ( strstr(p, "SIP/2.0 ") == p && IsResponseTo(p, "INVITE") && atoi(p + 8) >= 300 )
+  {
+    // Sonstige Ablehnung (404 unbekannt, 480 nicht erreichbar, 503, ...):
+    // sofort beenden statt bis zum Timeout zu warten
+    Ack(p);
+    StopCall();
+    iRingTime = 0;
+    eCallResult = CALL_FAILED;
+    iCallCode = atoi(p + 8);
   }
   else if (strstr(p, "INFO") == p)
   {
@@ -745,7 +772,10 @@ void Sip::Hangup() {
   if ( bAnswered )
     Bye(iInviteCSeq + 1);   // CSeq muss ueber der des INVITE liegen
   else
+  {
     Cancel();               // klingelt noch -> Anruf zurueckziehen
+    eCallResult = CALL_NOANSWER;
+  }
   StopCall();
   iRingTime = 0;
 }
@@ -777,7 +807,7 @@ void Sip::RtpProcessing() {
   }
 
   uint32_t now = millis();
-  if (now - callAnsweredAt > (uint32_t)iBeepSeconds * 1000UL) {
+  if (now - callAnsweredAt > (uint32_t)TalkSeconds() * 1000UL) {
     Hangup();
     return;
   }
@@ -814,8 +844,9 @@ void Sip::SendRtpFrame() {
   pkt[11] = rtpSsrc & 0xFF;
 
   // Muster: 200 ms Ton, 200 ms Pause (10 Frames an, 10 aus) - am Stream-Takt
-  // ausgerichtet statt an millis(), damit die Toene sauber geschnitten sind
-  bool on = (rtpFrame % 20) < 10;
+  // ausgerichtet statt an millis(), damit die Toene sauber geschnitten sind.
+  // Nach der Beep-Dauer nur noch Stille (Gespraech bleibt fuer Code-Eingabe offen).
+  bool on = (rtpFrame % 20) < 10 && rtpFrame < (uint32_t)iBeepSeconds * 50;
   for (int i = 0; i < 160; i++)
     pkt[12 + i] = on ? ulawTone[i & 7] : 0xFF;   // 0xFF = u-law Stille
 

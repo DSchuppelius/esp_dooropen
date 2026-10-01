@@ -23,6 +23,8 @@
 // Taster (je eine Ader an den Pin, die andere an GND; gedrueckt = LOW)
 #define PIN_BTN_RING   32   // GPIO32: Klingel-Taster (wirkt wie das Klingelsignal)
 #define PIN_BTN_BUZZER 33   // GPIO33: Summer-Taster (oeffnet die Tuer)
+// Tuerkontakt (Reed-Kontakt gegen GND), im Web aktivieren
+#define PIN_DOOR       25   // GPIO25
 
 // Onboard-LED (GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
 #define PIN_STATUS_LED    2       // GPIO2 (Onboard-LED, active-high)
@@ -50,6 +52,10 @@
 #define PIN_BTN_RING   D7   // GPIO13: Klingel-Taster (wirkt wie das Klingelsignal)
 // GPIO0 ist Boot-Pin: beim Einschalten NICHT gedrueckt halten (sonst Flash-Modus)
 #define PIN_BTN_BUZZER D3   // GPIO0:  Summer-Taster (oeffnet die Tuer)
+// Tuerkontakt (Reed-Kontakt gegen GND) auf RX: die serielle Schnittstelle
+// laeuft dann nur noch als Ausgabe. Beim Flashen per USB Kontakt offen lassen.
+#define PIN_DOOR       3    // GPIO3 (RX)
+#define DOOR_ON_RX_PIN
 
 // Onboard-LED (blaue LED, GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
 #define PIN_STATUS_LED    LED_BUILTIN
@@ -75,7 +81,50 @@
 #define SIGNAL_HOLD_MS           3000
 // Wie lange "Es klingelt" nach dem Tastendruck angezeigt bleibt (ms)
 #define RING_NOTIFY_MS           10000
+// Sperre gegen Sturmklingeln: weiteres Klingeln innerhalb dieser Zeit (ms) zaehlt,
+// loest aber keinen neuen Anruf, kein HA-Ereignis und keinen Protokolleintrag aus
+#define RING_COOLDOWN_MS         5000
 #define WIFI_AP_NAME             "Tueroeffner-Setup"
+// Name im Netz: http://tueroeffner.local (mDNS), auch fuer OTA-Updates
+#define HOSTNAME                 "tueroeffner"
+
+// ============================================================
+//  Uhrzeit (NTP) fuer Protokoll und Nachtruhe
+// ============================================================
+#define NTP_SERVER   "pool.ntp.org"
+#define TIME_ZONE    "CET-1CEST,M3.5.0,M10.5.0/3"   // Mitteleuropa mit Sommerzeit
+
+// ============================================================
+//  Zaehler dauerhaft speichern
+//  Flash nicht bei jedem Ereignis beschreiben: hoechstens alle X ms.
+// ============================================================
+#define COUNTER_SAVE_MS  300000UL
+
+// Ereignisprotokoll (nur im RAM, geht beim Neustart verloren)
+#define LOG_SIZE         20
+
+// Notfall: Klingel-Taster beim Einschalten so lange halten (ms)
+// -> Passwoerter weg und wieder DHCP statt fester IP
+#define PW_RESET_HOLD_MS 5000
+
+// ============================================================
+//  Selbstheilung
+// ============================================================
+// Neustart, wenn das WLAN so lange (Minuten) weg ist
+#define WIFI_LOST_RESTART_MIN   10
+// Neustart, wenn der freie Speicher darunter faellt (Bytes)
+#define MIN_FREE_HEAP           8000
+// ESP32: Watchdog, falls die Loop haengt (Sekunden). Grosszuegig wegen
+// blockierender Schritte (SIP-Anmeldung, Updates).
+#define LOOP_WATCHDOG_SEC       60
+
+// ============================================================
+//  Push-Mitteilungen (ntfy / Telegram), im Web einstellbar
+// ============================================================
+#define PUSH_TIMEOUT_MS         4000
+
+// Wie lange ein Anruf mit Oeffnungs-Code nach dem Abheben offen bleibt (s)
+#define SIP_PIN_CALL_SECONDS    30
 
 // ============================================================
 //  VoIP / SIP (ansitel = Asterisk)
@@ -113,4 +162,5 @@
 #define SCREEN_TIMEOUT_SECONDS 60
 // Zielrufnummer, die beim Klingeln angerufen wird (im Web aenderbar).
 #define DEFAULT_DIAL_NR  ""
-#define MAX_DIAL_LEN     20
+#define MAX_DIAL_LEN     20     // eine Nummer
+#define MAX_DIAL_LIST    64     // Rufkette, z.B. "100, 101, 0171..."

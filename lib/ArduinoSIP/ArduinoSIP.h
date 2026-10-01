@@ -69,6 +69,16 @@ class Sip
     char        ReadDtmf() { char c = cLastDtmf; cLastDtmf = 0; return c; }
     // Anruf sofort beenden: BYE wenn angenommen, sonst CANCEL. (Erweiterung)
     void        Hangup();
+    // Gespraechsdauer nach dem Abheben (Sekunden), mindestens die Beep-Dauer;
+    // laenger z.B. fuer die Eingabe eines Oeffnungs-Codes. (Erweiterung)
+    void        SetCallSeconds(int s) { iCallSeconds = s; }
+    // Ergebnis der letzten Registrierung: -1 = noch keine, 0 = keine Antwort,
+    // sonst SIP-Statuscode (200 = ok, 401 nach Digest = Zugangsdaten falsch, ...)
+    int         RegisterStatus() { return iRegStatus; }
+    // Ergebnis des letzten Anrufs (gueltig, sobald IsBusy() false ist)
+    enum CallResult { CALL_NONE, CALL_ANSWERED, CALL_NOANSWER, CALL_BUSY, CALL_DECLINED, CALL_FAILED };
+    CallResult  LastCallResult() { return eCallResult; }
+    int         LastCallCode() { return iCallCode; }   // SIP-Code bei CALL_FAILED
 
   private:
     char       *pbuf;
@@ -83,6 +93,12 @@ class Sip
     uint32_t    regTag = 0;
     int         iRegCSeq = 1;
     int         iRegExpires = 3600;
+    int         iRegStatus = -1;
+
+    // Anruf-Ergebnis / Gespraechsdauer (Erweiterung)
+    CallResult  eCallResult = CALL_NONE;
+    int         iCallCode = 0;
+    int         iCallSeconds = 0;
 
     const char *pSipIp;
     int         iSipPort;
@@ -148,6 +164,7 @@ class Sip
     void        MakeMd5Digest(char *pOutHex33, char *pIn);
 
     // RTP / Beep-Helfer (Erweiterung)
+    int         TalkSeconds() { return iCallSeconds > iBeepSeconds ? iCallSeconds : iBeepSeconds; }
     void        StartRtp(const char *pIn);
     void        StopCall();
     void        RtpProcessing();
