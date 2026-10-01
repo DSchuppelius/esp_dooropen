@@ -625,15 +625,17 @@ void Sip::Invite(const char *p) {
   
   if ( iBeepSeconds > 0 )
   {
-    // SDP-Angebot (early offer): PCMU/G.711 auf unserem RTP-Port
-    char sdp[300];
+    // SDP-Angebot (early offer): G.711 A-law und u-law auf unserem RTP-Port.
+    // Viele europaeische Anlagen akzeptieren nur PCMA (sonst 488 Not Acceptable).
+    char sdp[340];
     snprintf(sdp, sizeof(sdp),
       "v=0\r\n"
       "o=- %010u %010u IN IP4 %s\r\n"
       "s=doorbell\r\n"
       "c=IN IP4 %s\r\n"
       "t=0 0\r\n"
-      "m=audio %i RTP/AVP 0 101\r\n"
+      "m=audio %i RTP/AVP 8 0 101\r\n"
+      "a=rtpmap:8 PCMA/8000\r\n"
       "a=rtpmap:0 PCMU/8000\r\n"
       "a=rtpmap:101 telephone-event/8000\r\n"
       "a=fmtp:101 0-15\r\n"
@@ -723,11 +725,41 @@ uint8_t Sip::Lin2Ulaw(int16_t sample) {
   return (uint8_t)(~(sign | (exponent << 4) | mantissa));
 }
 
+// Lineares 16-bit PCM -> G.711 A-law
+uint8_t Sip::Lin2Alaw(int16_t sample) {
+  int v = sample >> 3;                          // 13 Bit
+  uint8_t mask;
+  if (v >= 0) mask = 0xD5;
+  else { mask = 0x55; v = -v - 1; }
+  if (v > 0xFFF) v = 0xFFF;
+  int seg = 0;
+  while (seg < 7 && v > (0x20 << seg) - 1) seg++;   // Segmentgrenzen 0x1F, 0x3F ... 0xFFF
+  uint8_t aval = (uint8_t)(seg << 4);
+  aval |= (seg < 2 ? (v >> 1) : (v >> seg)) & 0x0F;
+  return aval ^ mask;
+}
+
 // 200 OK ausgewertet: Gegenstellen-RTP-Ziel ermitteln und Streaming starten
 void Sip::StartRtp(const char *p) {
   remoteRtpPort = 0;   // keine Werte vom vorherigen Anruf weiterverwenden
+  rtpPt  = 0;
+  dtmfPt = 101;
   const char *m = strstr(p, "m=audio ");
-  if (m) remoteRtpPort = (uint16_t)atoi(m + 8);
+  if (m) {
+    remoteRtpPort = (uint16_t)atoi(m + 8);
+    // Erster Payload Type der Antwort ist der gewaehlte Codec
+    const char *avp = strstr(m, "RTP/AVP ");
+    const char *eol = strchr(m, '\r');
+    if (avp && (!eol || avp < eol) && atoi(avp + 8) == 8) rtpPt = 8;
+  }
+  // DTMF-Payload-Type aus "a=rtpmap:NN telephone-event/8000" uebernehmen
+  for (const char *r = strstr(p, "a=rtpmap:"); r; r = strstr(r + 9, "a=rtpmap:")) {
+    const char *sp = strchr(r + 9, ' ');
+    if (sp && strncmp(sp + 1, "telephone-event", 15) == 0) {
+      dtmfPt = (uint8_t)atoi(r + 9);
+      break;
+    }
+  }
   const char *c = strstr(p, "c=IN IP4 ");
   if (c) {
     c += 9;
@@ -744,6 +776,7 @@ void Sip::StartRtp(const char *p) {
     for (int k = 0; k < 8; k++) {
       int16_t s = (int16_t)(8000.0f * sinf(2.0f * PI * k / 8.0f));
       ulawTone[k] = Lin2Ulaw(s);
+      alawTone[k] = Lin2Alaw(s);
     }
     bToneReady = true;
   }
@@ -790,7 +823,7 @@ void Sip::RtpProcessing() {
   {
     uint8_t rb[180];
     int n = Rtp.read(rb, sizeof(rb));
-    if ( n >= 16 && (rb[1] & 0x7F) == 101 )
+    if ( n >= 16 && (rb[1] & 0x7F) == dtmfPt )
     {
       uint8_t event  = rb[12];
       bool    endbit = rb[13] & 0x80;
@@ -830,7 +863,7 @@ void Sip::RtpProcessing() {
 void Sip::SendRtpFrame() {
   uint8_t pkt[12 + 160];
   pkt[0] = 0x80;
-  pkt[1] = 0x00;                              // Payload Type 0 = PCMU
+  pkt[1] = rtpPt;                             // Payload Type 0 = PCMU, 8 = PCMA
   if (rtpFrame == 0) pkt[1] |= 0x80;          // Marker beim ersten Frame
   pkt[2] = (rtpSeq >> 8) & 0xFF;
   pkt[3] = rtpSeq & 0xFF;
@@ -847,8 +880,10 @@ void Sip::SendRtpFrame() {
   // ausgerichtet statt an millis(), damit die Toene sauber geschnitten sind.
   // Nach der Beep-Dauer nur noch Stille (Gespraech bleibt fuer Code-Eingabe offen).
   bool on = (rtpFrame % 20) < 10 && rtpFrame < (uint32_t)iBeepSeconds * 50;
+  const uint8_t *tone   = rtpPt == 8 ? alawTone : ulawTone;
+  const uint8_t silence = rtpPt == 8 ? 0xD5 : 0xFF;   // Stille in A-law / u-law
   for (int i = 0; i < 160; i++)
-    pkt[12 + i] = on ? ulawTone[i & 7] : 0xFF;   // 0xFF = u-law Stille
+    pkt[12 + i] = on ? tone[i & 7] : silence;
 
   Rtp.beginPacket(remoteRtpIp, remoteRtpPort);
   Rtp.write(pkt, sizeof(pkt));

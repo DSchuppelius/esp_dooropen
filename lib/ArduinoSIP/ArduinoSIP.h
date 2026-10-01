@@ -138,7 +138,10 @@ class Sip
     uint32_t    rtpFrame = 0;
     int         iBeepSeconds = 0;
     uint8_t     ulawTone[8];
+    uint8_t     alawTone[8];
     bool        bToneReady = false;
+    uint8_t     rtpPt = 0;        // ausgehandelter Codec: 0 = PCMU, 8 = PCMA
+    uint8_t     dtmfPt = 101;     // telephone-event Payload Type laut Antwort
     char        cLastDtmf = 0;
     uint32_t    lastDtmfAt = 0;
 	
@@ -170,6 +173,7 @@ class Sip
     void        RtpProcessing();
     void        SendRtpFrame();
     uint8_t     Lin2Ulaw(int16_t sample);
+    uint8_t     Lin2Alaw(int16_t sample);
 
 };
 
