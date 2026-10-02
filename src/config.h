@@ -26,7 +26,9 @@
 // Tuerkontakt (Reed-Kontakt gegen GND), im Web aktivieren
 #define PIN_DOOR       25   // GPIO25
 
-// Onboard-LED (GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
+// Onboard-LED (GPIO2): Summer an = Dauerlicht, Blinkmuster zeigen WLAN-/SIP-Probleme.
+// Manche DevKits haben dort keine LED (nur die rote Betriebs-LED) -> externe LED
+// mit 330 Ohm von GPIO2 nach GND anschliessen.
 #define PIN_STATUS_LED    2       // GPIO2 (Onboard-LED, active-high)
 #define STATUS_LED_ACTIVE_LOW false
 
@@ -57,7 +59,7 @@
 #define PIN_DOOR       3    // GPIO3 (RX)
 #define DOOR_ON_RX_PIN
 
-// Onboard-LED (blaue LED, GPIO2) spiegelt den Summer-Zustand -> Test ohne Relais.
+// Onboard-LED (blaue LED, GPIO2): Summer an = Dauerlicht, Blinkmuster fuer WLAN/SIP.
 #define PIN_STATUS_LED    LED_BUILTIN
 #define STATUS_LED_ACTIVE_LOW true
 #endif
@@ -76,6 +78,9 @@
 #define MIN_BUZZER_SECONDS       1
 #define MAX_BUZZER_SECONDS       30
 #define SIGNAL_DEBOUNCE_MS       50
+// Klingelsignal ueber Optokoppler an Wechselspannung pulst mit 50 Hz (alle 20 ms):
+// so lange nach dem letzten aktiven Pegel gilt das Signal noch als aktiv (ms)
+#define SIGNAL_AC_HOLD_MS        40
 // Weboberflaeche: "Signal aktiv" nach dem Loslassen noch so lange zeigen (ms),
 // sonst verpasst die 1-s-Abfrage kurze Tastendruecke
 #define SIGNAL_HOLD_MS           3000
@@ -85,6 +90,12 @@
 // loest aber keinen neuen Anruf, kein HA-Ereignis und keinen Protokolleintrag aus
 #define RING_COOLDOWN_MS         5000
 #define WIFI_AP_NAME             "Tueroeffner-Setup"
+// Passwort des Einrichtungs-WLANs (mind. 8 Zeichen; im Web aenderbar, leer = offen).
+// Bitte je Installation aendern - dieser Wert steht oeffentlich im Quelltext.
+#define WIFI_AP_PASSWORD         "tuer-einrichten"
+// Wie lange das Einrichtungs-WLAN offen bleibt, wenn das bekannte WLAN fehlt (s).
+// Waehrenddessen laufen Klingel, Taster und Summer normal weiter.
+#define WIFI_PORTAL_SECONDS      300
 // Name im Netz: http://tueroeffner.local (mDNS), auch fuer OTA-Updates
 #define HOSTNAME                 "tueroeffner"
 
@@ -100,8 +111,8 @@
 // ============================================================
 #define COUNTER_SAVE_MS  300000UL
 
-// Ereignisprotokoll (nur im RAM, geht beim Neustart verloren)
-#define LOG_SIZE         20
+// Ereignisprotokoll (wird mit den Zaehlern gesichert und uebersteht Neustarts)
+#define LOG_SIZE         30
 
 // Notfall: Klingel-Taster beim Einschalten so lange halten (ms)
 // -> Passwoerter weg und wieder DHCP statt fester IP
@@ -114,9 +125,19 @@
 #define WIFI_LOST_RESTART_MIN   10
 // Neustart, wenn der freie Speicher darunter faellt (Bytes)
 #define MIN_FREE_HEAP           8000
-// ESP32: Watchdog, falls die Loop haengt (Sekunden). Grosszuegig wegen
-// blockierender Schritte (SIP-Anmeldung, Updates).
+// ... oder der groesste zusammenhaengende Block (Zerstueckelung, v.a. ESP8266)
+#define MIN_FREE_BLOCK          3000
+// Watchdog, falls die Loop haengt (Sekunden). Grosszuegig wegen blockierender
+// Schritte (Updates, Push auf dem ESP8266). ESP32: Task-Watchdog, ESP8266: Ticker.
 #define LOOP_WATCHDOG_SEC       60
+
+// ============================================================
+//  Schutz der Weboberflaeche
+// ============================================================
+// Nach so vielen falschen Anmeldungen wird die Adresse gesperrt ...
+#define AUTH_MAX_FAILS          5
+// ... zunaechst fuer so viele Sekunden, bei weiteren Fehlern laenger (max. 15 min)
+#define AUTH_LOCK_SEC           60
 
 // ============================================================
 //  Push-Mitteilungen (ntfy / Telegram), im Web einstellbar
@@ -125,6 +146,20 @@
 
 // Wie lange ein Anruf mit Oeffnungs-Code nach dem Abheben offen bleibt (s)
 #define SIP_PIN_CALL_SECONDS    30
+
+// Syslog (UDP) fuer die Fehlersuche aus der Ferne; Server im Web einstellbar
+#define SYSLOG_PORT             514
+
+// ============================================================
+//  Eingehende Anrufe und Gaestecodes
+//  Wer den Tueroeffner anruft, hoert einen kurzen Ton und tippt einen Code
+//  (Oeffnen-Code oder Gaestecode). Nur aktiv, wenn im Web eingeschaltet.
+// ============================================================
+#define INCOMING_CALL_SECONDS   30     // so lange bleibt der Anruf offen
+#define INCOMING_MAX_TRIES      3      // falsche Codes je Anruf, dann auflegen
+#define INCOMING_LOCK_FAILS     6      // falsche Codes insgesamt ...
+#define INCOMING_LOCK_MIN       15     // ... innerhalb/fuer so viele Minuten -> Sperre
+#define GUEST_CODES_MAX         5      // Anzahl Gaestecodes
 
 // ============================================================
 //  VoIP / SIP (ansitel = Asterisk)

@@ -432,3 +432,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Erzeugt von tools/embed_html.py
+include/index_html.h

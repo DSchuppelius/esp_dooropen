@@ -1,0 +1,821 @@
+<!DOCTYPE html><html lang="de"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f1115">
+<title>Türöffner</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Crect width=%2724%27 height=%2724%27 rx=%276%27 fill=%27%2316a34a%27/%3E%3Cpath d=%27M7 11V8a5 5 0 0 1 10 0v3%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272%27/%3E%3Crect x=%275%27 y=%2711%27 width=%2714%27 height=%279%27 rx=%272%27 fill=%27white%27/%3E%3C/svg%3E">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Türöffner">
+<style>
+:root{--bg:#f2f3f7;--card:#fff;--tile:#f6f7fa;--fg:#15171c;--mut:#6b7280;--line:#e4e6eb;
+ --acc:#2563eb;--ok:#16a34a;--warn:#f59e0b;--bad:#dc2626;--sh:0 10px 30px rgba(15,17,21,.08)}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--tile:#1f232c;--fg:#eef0f4;
+ --mut:#8b93a1;--line:#2a2f3a;--acc:#3b82f6;--ok:#22c55e;--sh:0 10px 30px rgba(0,0,0,.4)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+ display:flex;justify-content:center;padding:24px 16px}
+.app{width:100%;max-width:400px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:22px;margin:0;letter-spacing:-.02em}
+.pill{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);background:var(--card);
+ padding:6px 10px;border-radius:99px;box-shadow:var(--sh)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.dot.off{background:var(--bad)}
+.card{background:var(--card);border-radius:20px;padding:20px;box-shadow:var(--sh);margin-bottom:14px}
+.card.alert{border:2px solid var(--warn)}
+.card.alert p{margin:0 0 10px}
+.seg{display:flex;background:var(--card);border-radius:14px;padding:4px;margin-bottom:14px;box-shadow:var(--sh)}
+.seg button{flex:1;border:0;background:none;color:var(--mut);padding:10px 4px;border-radius:10px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.seg button.active{background:var(--acc);color:#fff}
+.tab{display:none}.tab.show{display:block}
+.ringing .ring .bg{stroke:var(--warn);animation:glow 1.2s ease-in-out infinite}
+@keyframes glow{50%{opacity:.35}}
+.ringing .hint{color:var(--warn);font-size:17px;font-weight:700}
+.door{display:flex;flex-direction:column;align-items:center;padding:8px 0 4px}
+.ring{position:relative;width:170px;height:170px}
+.ring>svg{position:absolute;inset:0;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:8}
+.ring .bg{stroke:var(--line)}
+.ring .pr{stroke:var(--ok);stroke-linecap:round;stroke-dasharray:490;stroke-dashoffset:490;transition:stroke-dashoffset .25s linear}
+.open{position:absolute;inset:16px;border:0;border-radius:50%;background:var(--ok);color:#fff;cursor:pointer;
+ font:inherit;font-size:17px;font-weight:700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+ box-shadow:0 8px 24px color-mix(in srgb,var(--ok) 40%,transparent);transition:transform .1s}
+.open:active{transform:scale(.95)}
+.open svg{width:38px;height:38px}
+.open.active{background:color-mix(in srgb,var(--ok) 80%,#000)}
+.hint{color:var(--mut);font-size:13px;margin-top:10px;min-height:24px;display:flex;align-items:center;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.tile{background:var(--tile);border-radius:14px;padding:10px 12px;min-width:0}
+.tile small{display:block;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.tile b{font-size:18px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile b.sm{font-size:14px;line-height:25px}
+.on{color:var(--ok)}.off{color:var(--mut)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.btn{border:0;border-radius:12px;padding:12px;font:inherit;font-weight:600;cursor:pointer;background:var(--tile);color:var(--fg)}
+.btn:active{opacity:.7}
+.btn.pri{background:var(--acc);color:#fff;width:100%;margin-top:14px}
+.btn.full{width:100%;margin-top:8px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:0 0 12px}
+h2 b{float:right;text-transform:none}
+h3{font-size:13px;color:var(--mut);margin:16px 0 0;font-weight:600}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 4px}
+input[type=text],input[type=number],input[type=password],input[type=time],input[type=datetime-local],select{width:100%;padding:11px 12px;border-radius:10px;
+ border:1px solid var(--line);background:var(--tile);color:var(--fg);font:inherit;min-width:0}
+input:focus,select:focus{outline:2px solid var(--acc);outline-offset:-1px}
+input.dirty,select.dirty{border-color:var(--warn)}
+.btn.pri.due{box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 55%,transparent)}
+.two{display:grid;grid-template-columns:2fr 1fr;gap:8px}
+.half{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sw{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}
+.sw input{appearance:none;flex:none;width:46px;height:28px;border-radius:99px;background:var(--line);position:relative;cursor:pointer;transition:.2s;margin:0}
+.sw input::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.2s}
+.sw input:checked{background:var(--ok)}
+.sw input:checked::after{left:21px}
+.days{display:flex;gap:4px;margin-top:4px}
+.days label{flex:1;margin:0}
+.days input{position:absolute;opacity:0;pointer-events:none}
+.days span{display:block;text-align:center;padding:8px 0;border-radius:8px;background:var(--tile);font-size:13px;font-weight:600;color:var(--mut);cursor:pointer}
+.days input:checked+span{background:var(--acc);color:#fff}
+.days input.dirty+span{box-shadow:inset 0 0 0 2px var(--warn)}
+.guest{background:var(--tile);border-radius:12px;padding:10px;margin-top:8px}
+.guest .half input{background:var(--card)}
+.guest input[type=datetime-local]{background:var(--card);margin-top:8px}
+.guest .gl{display:flex;align-items:center;justify-content:space-between;margin-top:8px;font-size:13px;color:var(--mut)}
+.guest .gl label{display:flex;align-items:center;gap:6px;margin:0}
+.guest.exp{opacity:.55}
+.guest .x{background:none;border:0;color:var(--bad);font:inherit;font-weight:600;cursor:pointer;padding:4px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,160px);background:var(--fg);color:var(--bg);
+ padding:12px 18px;border-radius:12px;font-weight:600;transition:transform .25s;box-shadow:var(--sh);max-width:90vw}
+.toast.show{transform:translate(-50%,0)}
+.toast.err{background:var(--bad);color:#fff}
+.kv{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.kv span{color:var(--mut)}
+.kv b,.kv code{text-align:right}
+code{font:13px ui-monospace,Consolas,monospace;word-break:break-all}
+.note{color:var(--mut);font-size:13px;margin:12px 0 0}
+.log{list-style:none;margin:0;padding:0}
+.log li{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.log li:last-child{border-bottom:0}
+.log li small{display:block;color:var(--mut);font-size:12px}
+.log time{color:var(--mut);font-size:13px;white-space:nowrap}
+.btn.bad{background:var(--bad);color:#fff}
+input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-top:4px}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:12px;display:none}
+.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+.open{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
+.open small{font-size:11px;font-weight:600;opacity:.85}
+.login{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:16px;z-index:10}
+.login .card{width:100%;max-width:360px;margin:0}
+.login h1{font-size:20px;margin:0 0 4px}
+.login .err{color:var(--bad);font-size:13px;min-height:18px;margin:10px 0 0}
+.pw{position:relative}
+.pw input{padding-right:44px!important}
+.eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;color:var(--mut);cursor:pointer;padding:8px;line-height:0}
+.eye svg{width:18px;height:18px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.chip{border:0;border-radius:99px;padding:6px 11px;background:var(--tile);color:var(--mut);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.chip.on{background:var(--acc);color:#fff}
+.hide{display:none!important}
+</style></head><body>
+<div class="app">
+ <header>
+  <h1>Türöffner</h1>
+  <div style="display:flex;gap:8px">
+   <a class="pill hide" id="login" href="#anmelden" onclick="showLogin(true);return false" style="text-decoration:none;color:var(--acc);font-weight:600">Anmelden</a>
+   <a class="pill hide" id="logout" href="#" onclick="logout();return false" style="text-decoration:none;color:var(--mut);font-weight:600">Abmelden</a>
+   <div class="pill"><span class="dot" id="conn"></span><span id="connt">verbinde…</span></div>
+  </div>
+ </header>
+
+ <div class="card alert hide" id="offline"><p style="margin:0"><b>⚠️ Keine Verbindung zum Türöffner.</b>
+  Ist das Gerät eingeschaltet und im WLAN? Es wird weiter versucht …</p></div>
+
+ <div class="card alert hide" id="nopw">
+  <p><b>⚠️ Kein Passwort gesetzt.</b> Jeder im WLAN kann die Tür öffnen und alle Einstellungen ändern.</p>
+  <button class="btn full" style="margin-top:0" onclick="tab(3);$('webuser').focus()">Jetzt Admin-Passwort setzen</button>
+ </div>
+
+ <div class="seg" id="seg">
+  <button id="tb0" class="active" onclick="tab(0)">Tür</button>
+  <button id="tb1" onclick="tab(1)">Einstellungen</button>
+  <button id="tb2" onclick="tab(2)">Dienste</button>
+  <button id="tb3" onclick="tab(3)">System</button>
+ </div>
+
+ <div id="t0" class="tab show">
+  <div class="card" id="doorc">
+   <div class="door">
+    <div class="ring">
+     <svg viewBox="0 0 170 170"><circle class="bg" cx="85" cy="85" r="78"/><circle class="pr" id="prog" cx="85" cy="85" r="78"/></svg>
+     <button class="open" id="openb" onpointerdown="holdStart(event)" onpointerup="holdEnd()" onpointerleave="holdEnd()"
+      onpointercancel="holdEnd()" oncontextmenu="return false" onclick="if(event.detail===0)openDoor()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+      <span id="openl">Öffnen</span><small id="openh">gedrückt halten</small>
+     </button>
+    </div>
+    <div class="hint" id="hint">&nbsp;</div>
+   </div>
+  </div>
+
+  <div class="card">
+   <div class="grid">
+    <div class="tile"><small>Signal</small><b id="sig">–</b></div>
+    <div class="tile"><small>Summer</small><b id="buz">–</b></div>
+    <div class="tile"><small>SIP</small><b id="reg">–</b></div>
+    <div class="tile"><small>Klingeln</small><b id="rings">–</b></div>
+    <div class="tile"><small>Öffnungen</small><b id="cnt">–</b></div>
+    <div class="tile"><small>Anrufe</small><b id="calls">–</b></div>
+    <div class="tile"><small>Tür</small><b id="doorst">–</b></div>
+    <div class="tile"><small>Modus</small><b id="mode" class="sm">–</b></div>
+    <div class="tile"><small>Letzter Anruf</small><b id="lastc" class="sm">–</b></div>
+   </div>
+   <div class="row2">
+    <button class="btn" onclick="testCall()">📞 Test-Anruf</button>
+    <button class="btn" id="snd" onclick="initAudio();beep()">🔇 Ton testen</button>
+   </div>
+  </div>
+  <div class="card">
+   <h2>Verlauf <b id="logcnt" class="off"></b></h2>
+   <div class="chips" id="logf">
+    <button class="chip on" data-f="">Alle</button><button class="chip" data-f="ring">Klingeln</button>
+    <button class="chip" data-f="open">Öffnungen</button><button class="chip" data-f="call">Anrufe</button>
+   </div>
+   <ul class="log" id="log"><li><span>Noch keine Ereignisse</span></li></ul>
+   <button class="btn full hide" id="logmore" onclick="toggleLog()"></button>
+  </div>
+ </div>
+
+ <div id="t1" class="tab">
+  <div class="card">
+   <h2>Türsummer &amp; Anruf</h2>
+   <label for="dur">Summer-Dauer (Sekunden)</label>
+   <input id="dur" type="number" min="1" max="30">
+   <label for="dial">Anrufen beim Klingeln (Rufkette)</label>
+   <input id="dial" type="text" inputmode="tel" placeholder="z. B. 100, 101">
+   <label for="pin">Öffnen-Code am Telefon</label>
+   <input id="pin" type="text" inputmode="numeric" maxlength="8" placeholder="leer = Taste *" autocomplete="off">
+   <div class="sw"><span>Beim Klingeln anrufen</span><input id="auto" type="checkbox"></div>
+   <p class="note">Mehrere Nummern werden nacheinander angerufen, bis jemand abhebt (je 15 s).
+   Mit Code bleibt das Gespräch 30 s offen; „*“ oder „#“ löscht die Eingabe.</p>
+   <button class="btn pri" onclick="saveGeneral()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Anrufe an den Türöffner <b id="inst" class="off">–</b></h2>
+   <div class="sw" style="margin-top:0"><span>Anrufe annehmen</span><input id="inon" type="checkbox"></div>
+   <p class="note" id="innote">Wer den Türöffner anruft, hört einen kurzen Ton und tippt den Öffnen-Code oder einen Gästecode.</p>
+   <h3>Gästecodes</h3>
+   <div id="glist"></div>
+   <button class="btn full" id="gadd" onclick="addGuest()">+ Gästecode</button>
+   <p class="note">4–8 Ziffern. „Einmalig“ löscht den Code nach dem Öffnen; ohne Ablaufdatum gilt er unbegrenzt.
+   Nach mehreren falschen Codes werden Anrufe 15 min gesperrt.</p>
+   <button class="btn pri" onclick="saveIncoming()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Nachtruhe</h2>
+   <div class="sw" style="margin-top:0"><span>Nachts nicht anrufen</span><input id="qon" type="checkbox"></div>
+   <div class="half">
+    <div><label for="qfrom">von</label><input id="qfrom" type="time"></div>
+    <div><label for="qto">bis</label><input id="qto" type="time"></div>
+   </div>
+   <p class="note" id="qnote">Klingeln wird weiter gezählt, protokolliert und gemeldet.</p>
+   <button class="btn pri" onclick="saveQuiet()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Praxis-Modus</h2>
+   <div class="sw" style="margin-top:0"><span>Beim Klingeln automatisch öffnen</span><input id="pon" type="checkbox"></div>
+   <label>Tage</label>
+   <div class="days" id="pdays"></div>
+   <div class="half">
+    <div><label for="pfrom">von</label><input id="pfrom" type="time"></div>
+    <div><label for="pto">bis</label><input id="pto" type="time"></div>
+    <div><label for="pfrom2">2. Fenster von</label><input id="pfrom2" type="time"></div>
+    <div><label for="pto2">bis</label><input id="pto2" type="time"></div>
+   </div>
+   <label for="pfree">Ausnahmetage (Feiertage, Urlaub)</label>
+   <input id="pfree" type="text" placeholder="z. B. 24.12, 31.12, 3.10.2026">
+   <p class="note">In diesen Zeitfenstern öffnet Klingeln sofort die Tür, ohne Anruf. Zweites Fenster
+   z. B. für den Nachmittag; gleiche Zeiten = aus. Ausnahmetage ohne Jahr gelten jedes Jahr.</p>
+   <button class="btn pri" onclick="savePraxis()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Türkontakt</h2>
+   <div class="sw" style="margin-top:0"><span>Türkontakt angeschlossen</span><input id="don" type="checkbox"></div>
+   <div class="sw"><span>Kontakt umgekehrt</span><input id="dinv" type="checkbox"></div>
+   <label for="dalert">Melden, wenn länger offen als (Minuten, 0 = nie)</label>
+   <input id="dalert" type="number" min="0" max="1440">
+   <p class="note" id="dnote">Reed-Kontakt zwischen Pin und GND, geschlossen = Tür zu.</p>
+   <button class="btn pri" onclick="saveDoor()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>SIP-Zugang <b id="sipst" class="off">–</b></h2>
+   <div class="two">
+    <div><label for="sipserver">Server</label><input id="sipserver" type="text" maxlength="40"></div>
+    <div><label for="sipport">Port</label><input id="sipport" type="number" min="1" max="65535"></div>
+   </div>
+   <label for="sipuser">Benutzer</label>
+   <input id="sipuser" type="text" maxlength="24" autocomplete="off">
+   <label for="sippw">Passwort</label>
+   <input id="sippw" type="password" maxlength="32" placeholder="unverändert" autocomplete="new-password">
+   <button class="btn pri" onclick="saveSip()">Speichern &amp; neu registrieren</button>
+  </div>
+ </div>
+
+ <div id="t2" class="tab">
+  <div class="card">
+   <h2>Push-Mitteilungen <b id="pushst" class="off">–</b></h2>
+   <label for="ptype">Dienst</label>
+   <select id="ptype" onchange="pushForm()"><option value="0">aus</option><option value="1">ntfy</option><option value="2">Telegram</option></select>
+   <div id="pbox">
+    <div id="pserverbox"><label for="pserver">ntfy-Server</label><input id="pserver" type="text" placeholder="https://ntfy.sh"></div>
+    <label for="ptopic" id="ptopicl">Topic</label><input id="ptopic" type="text" autocomplete="off">
+    <label for="ptoken" id="ptokenl">Zugangs-Token (optional)</label><input id="ptoken" type="password" placeholder="unverändert" autocomplete="new-password">
+    <div class="sw"><span>Klingeln melden</span><input id="pev1" type="checkbox"></div>
+    <div class="sw"><span>Öffnen melden</span><input id="pev2" type="checkbox"></div>
+    <div class="sw"><span>Tür zu lange offen melden</span><input id="pev4" type="checkbox"></div>
+   </div>
+   <p class="note" id="pnote"></p>
+   <button class="btn pri" onclick="savePush()">Speichern</button>
+   <button class="btn full" onclick="testPush()">Test-Mitteilung senden</button>
+  </div>
+  <div class="card">
+   <h2>Home Assistant (MQTT) <b id="mqst" class="off">–</b></h2>
+   <div class="two">
+    <div><label for="mqserver">Broker</label><input id="mqserver" type="text" maxlength="40" placeholder="leer = aus"></div>
+    <div><label for="mqport">Port</label><input id="mqport" type="number" min="1" max="65535"></div>
+   </div>
+   <label for="mquser">Benutzer</label>
+   <input id="mquser" type="text" maxlength="32" autocomplete="off">
+   <label for="mqpw">Passwort</label>
+   <input id="mqpw" type="password" maxlength="32" placeholder="unverändert" autocomplete="new-password">
+   <button class="btn pri" onclick="saveMqtt()">Speichern &amp; verbinden</button>
+   <div class="kv" style="margin-top:12px"><span>Geräte-ID</span><code id="mqid">–</code></div>
+   <div class="kv"><span>Basis-Topic</span><code id="mqbase">–</code></div>
+   <p class="note">Das Gerät erscheint automatisch unter <b>Einstellungen → Geräte &amp; Dienste → MQTT</b>.
+   Voraussetzung: Mosquitto-Add-on und MQTT-Integration.</p>
+  </div>
+  <div class="card">
+   <h2>Syslog</h2>
+   <label for="syslog">Server (IP oder Name, UDP 514)</label>
+   <input id="syslog" type="text" maxlength="40" placeholder="leer = aus">
+   <p class="note">Meldungen und Ereignisse gehen zusätzlich an einen Syslog-Server – praktisch zur
+   Fehlersuche beim Kunden. Codes und Passwörter werden nicht übertragen.</p>
+   <button class="btn pri" onclick="saveSyslog()">Speichern</button>
+  </div>
+ </div>
+
+ <div id="t3" class="tab">
+  <div class="card">
+   <h2>Gerät</h2>
+   <div class="kv"><span>Adresse</span><code id="sysaddr">–</code></div>
+   <div class="kv"><span>Firmware</span><code id="sysver">–</code></div>
+   <div class="kv"><span>Laufzeit</span><b id="sysup">–</b></div>
+   <div class="kv"><span>Letzter Start</span><b id="sysboot">–</b></div>
+   <div class="kv"><span>Uhrzeit</span><b id="systime">–</b></div>
+   <div class="kv"><span>WLAN-Signal</span><b id="sysrssi">–</b></div>
+   <div class="kv"><span>Freier Speicher</span><b id="sysheap">–</b></div>
+   <div class="row2">
+    <button class="btn" onclick="restart()">↻ Neustart</button>
+    <button class="btn" onclick="resetCounters()">Zähler auf 0</button>
+   </div>
+   <button class="btn bad full" onclick="wifiReset()">WLAN zurücksetzen</button>
+  </div>
+  <div class="card">
+   <h2>Netzwerk</h2>
+   <div class="sw" style="margin-top:0"><span>Feste IP-Adresse</span><input id="nstatic" type="checkbox" onchange="netForm()"></div>
+   <div id="nbox">
+    <div class="half">
+     <div><label for="nip">IP-Adresse</label><input id="nip" type="text" inputmode="decimal"></div>
+     <div><label for="nmask">Subnetzmaske</label><input id="nmask" type="text" inputmode="decimal"></div>
+     <div><label for="ngw">Gateway</label><input id="ngw" type="text" inputmode="decimal"></div>
+     <div><label for="ndns">DNS</label><input id="ndns" type="text" inputmode="decimal"></div>
+    </div>
+   </div>
+   <p class="note">Das Gerät startet danach neu. Falsche Werte? Klingel-Taster beim Einschalten
+   5 s halten – dann gilt wieder DHCP.</p>
+   <button class="btn pri" onclick="saveNet()">Speichern &amp; neu starten</button>
+  </div>
+  <div class="card">
+   <h2>WLAN-Einrichtung <b id="apst" class="off">–</b></h2>
+   <label for="appw">Passwort für „<span id="apname">Tueroeffner-Setup</span>“</label>
+   <input id="appw" type="password" maxlength="32" placeholder="unverändert" autocomplete="new-password">
+   <p class="note" id="apnote">Dieses WLAN öffnet das Gerät nur, wenn das bekannte WLAN fehlt. Mindestens 8 Zeichen.</p>
+   <button class="btn pri" onclick="saveAp()">Passwort setzen</button>
+   <button class="btn full" onclick="apOpen()">Ohne Passwort (offen)</button>
+  </div>
+  <div class="card">
+   <h2>Admin-Zugang <b id="webst" class="off">–</b></h2>
+   <label for="webuser">Benutzer</label>
+   <input id="webuser" type="text" maxlength="24" autocomplete="off">
+   <label for="webpw">Neues Passwort</label>
+   <input id="webpw" type="password" maxlength="32" autocomplete="new-password">
+   <label for="webpw2">Passwort wiederholen</label>
+   <input id="webpw2" type="password" maxlength="32" autocomplete="new-password">
+   <button class="btn pri" onclick="saveWeb()">Passwort setzen</button>
+   <button class="btn full" id="weboff" onclick="webOff()">Passwortschutz entfernen</button>
+   <p class="note" id="webnote">Darf alles. Gilt auch für Updates aus PlatformIO (OTA) – OTA ist nur mit Passwort aktiv und übernimmt Änderungen erst nach einem Neustart.</p>
+  </div>
+  <div class="card">
+   <h2>Tür-Zugang <b id="opst" class="off">–</b></h2>
+   <label for="opuser">Benutzer</label>
+   <input id="opuser" type="text" maxlength="24" autocomplete="off">
+   <label for="oppw">Neues Passwort</label>
+   <input id="oppw" type="password" maxlength="32" autocomplete="new-password">
+   <button class="btn pri" onclick="saveOp()">Passwort setzen</button>
+   <button class="btn full" id="opoff" onclick="opOff()">Tür-Passwort entfernen</button>
+   <p class="note" id="opnote">Schützt den Tab „Tür“ (öffnen, Verlauf). Ohne Tür-Passwort kann jeder im WLAN
+   die Tür ohne Anmeldung öffnen; die Einstellungen schützt das Admin-Passwort.
+   Passwort vergessen? Klingel-Taster beim Einschalten 5 s halten – dann sind beide Passwörter weg.</p>
+  </div>
+  <div class="card">
+   <h2>Sicherung</h2>
+   <button class="btn full" style="margin-top:0" onclick="backup()">⬇ Einstellungen herunterladen</button>
+   <label for="rs">Sicherung einspielen</label>
+   <input id="rs" type="file" accept=".json">
+   <button class="btn pri" onclick="restore()">Einspielen &amp; neu starten</button>
+   <p class="note">Die Datei enthält alle Passwörter – sicher aufbewahren.</p>
+  </div>
+  <div class="card">
+   <h2>Firmware-Update</h2>
+   <input id="fw" type="file" accept=".bin">
+   <div class="bar" id="fwbar"><i id="fwprog"></i></div>
+   <button class="btn pri" onclick="upload()">Hochladen &amp; installieren</button>
+   <p class="note">Datei: <code>.pio/build/&lt;board&gt;/firmware.bin</code>. Einstellungen bleiben erhalten.</p>
+  </div>
+ </div>
+</div>
+<div class="login hide" id="loginv">
+ <div class="card">
+  <h1>Türöffner</h1>
+  <p class="note" style="margin:0 0 6px" id="lhint">Bitte anmelden.</p>
+  <form id="loginf" autocomplete="on">
+   <label for="lu">Benutzer</label>
+   <input id="lu" name="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false">
+   <label for="lp">Passwort</label>
+   <input id="lp" name="password" type="password" autocomplete="current-password">
+   <div class="sw"><span>Angemeldet bleiben (30 Tage)</span><input id="lk" type="checkbox"></div>
+   <p class="err" id="lerr"></p>
+   <button class="btn pri" type="submit" id="lbtn">Anmelden</button>
+   <button class="btn full" type="button" id="lcancel" onclick="hideLogin()">Abbrechen</button>
+  </form>
+ </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let audioCtx=null,soundOn=false,wasRinging=false,buzEnd=0,buzDur=1,tt,logN=-1,role=2,cur=0,cfgAt=0,gDirty=false,cfg={};
+const $=id=>document.getElementById(id);
+// Alle Anfragen der Seite kennzeichnen: das Geraet akzeptiert dafuer nur die
+// Sitzung, keine vom Browser gemerkte Basic-Anmeldung (sonst klappt Abmelden nicht)
+const _fetch=window.fetch.bind(window);
+window.fetch=(u,o={})=>{o.headers=Object.assign({'X-Tueroeffner':'1'},o.headers||{});return _fetch(u,o);};
+const TABS=['tuer','einstellungen','dienste','system'];
+function tab(n){cur=n;for(let i=0;i<4;i++){$('t'+i).className=i==n?'tab show':'tab';$('tb'+i).className=i==n?'active':'';}
+ try{history.replaceState(null,'',n?'#'+TABS[n]:location.pathname);}catch(e){}
+ if(n&&role==2)loadCfg();}
+// ---- Anmeldung (eigene Seite, Sitzungs-Cookie) ----
+let loginNeeded=false;
+function showLogin(cancelable,msg){
+ loginNeeded=!cancelable;
+ $('loginv').classList.remove('hide');$('lcancel').classList.toggle('hide',!cancelable);
+ $('lhint').textContent=msg||(cancelable?'Als Admin anmelden, um die Einstellungen zu ändern.':'Bitte anmelden, um die Tür zu öffnen.');
+ $('lerr').textContent='';setTimeout(()=>($('lu').value?$('lp'):$('lu')).focus(),50);
+}
+function hideLogin(){$('loginv').classList.add('hide');loginNeeded=false;
+ if(location.hash=='#anmelden')history.replaceState(null,'',location.pathname);}
+$('loginf').addEventListener('submit',async e=>{
+ e.preventDefault();e.stopPropagation();
+ const b=$('lbtn');b.disabled=true;$('lerr').textContent='';
+ try{
+  const r=await fetch('/api/login',{method:'POST',body:new URLSearchParams({user:$('lu').value.trim(),pw:$('lp').value,keep:$('lk').checked?1:0})});
+  let j={};try{j=await r.json();}catch(x){}
+  if(r.ok){$('lp').value='';hideLogin();toast(j.role==2?'Als Admin angemeldet':'Angemeldet');gen++;await refresh();if(role==2)loadCfg();}
+  else{$('lerr').textContent=j.err||'Anmeldung fehlgeschlagen';$('lp').select();}
+ }catch(x){$('lerr').textContent='Keine Verbindung';}
+ b.disabled=false;
+});
+async function logout(){
+ try{await fetch('/logout',{method:'POST'});}catch(e){}
+ cfg={};toast('Abgemeldet');gen++;if(cur)tab(0);refresh();
+}
+function toast(msg,err){const t=$('toast');t.textContent=msg;t.className='toast show'+(err?' err':'');
+ clearTimeout(tt);tt=setTimeout(()=>t.className='toast'+(err?' err':''),3000);}
+function initAudio(){
+ if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+ if(audioCtx.state==='suspended')audioCtx.resume();
+ soundOn=true;$('snd').textContent='🔊 Ton an';
+}
+function beep(){
+ if(!audioCtx)return;const t=audioCtx.currentTime;
+ for(let i=0;i<3;i++){const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='square';o.frequency.value=880;o.connect(g);g.connect(audioCtx.destination);
+  const s=t+i*.35;g.gain.setValueAtTime(.001,s);g.gain.exponentialRampToValueAtTime(.3,s+.02);
+  g.gain.exponentialRampToValueAtTime(.001,s+.25);o.start(s);o.stop(s+.26);}
+}
+document.addEventListener('click',initAudio,{once:true});
+// Wochentage fuer den Praxis-Modus
+['Mo','Di','Mi','Do','Fr','Sa','So'].forEach((d,i)=>{const l=document.createElement('label');
+ l.innerHTML='<input type="checkbox" id="pd'+i+'"><span>'+d+'</span>';$('pdays').append(l);});
+// Vom Nutzer geaenderte, noch nicht gespeicherte Felder: Aktualisierungen lassen sie in Ruhe
+const dirty=new Set();let gen=0;
+const isField=c=>c.id&&(c.tagName==='INPUT'||c.tagName==='SELECT')&&c.type!=='file';
+function due(c){const b=c.closest('.card').querySelector('.pri');if(b)b.classList.add('due');}
+function markDirty(e){const c=e.target;
+ if(c.closest&&c.closest('#glist')){gDirty=true;due(c);return;}
+ if(!isField(c))return;dirty.add(c.id);c.classList.add('dirty');due(c);}
+document.addEventListener('input',markDirty);document.addEventListener('change',markDirty);
+// Enter in einem Feld = Speichern-Button der Karte
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.tagName==='INPUT'&&!e.target.closest('#loginf')){
+ const b=e.target.closest('.card').querySelector('.pri');if(b){e.preventDefault();b.click();}}});
+function clean(ids){for(const id of ids){dirty.delete(id);const c=$(id);c.classList.remove('dirty');
+ const b=c.closest('.card').querySelector('.pri');if(b&&!c.closest('.card').querySelector('.dirty'))b.classList.remove('due');}}
+function setVal(id,v){const e=$(id);if(!dirty.has(id)&&document.activeElement!==e)e.value=v;}
+function setChk(id,v){const e=$(id);if(!dirty.has(id))e.checked=v;}
+function flag(id,on,a,b){const e=$(id);e.textContent=on?a:b;e.className=on?'on':'off';}
+function txt(id,t,c){const e=$(id);e.textContent=t;e.className=(e.classList.contains('sm')?'sm ':'')+(c||'');}
+// Alle Aenderungen per POST im Body (Passwoerter nie in der URL)
+async function post(url,okMsg,ids,params){
+ gen++;   // laufende Abfragen mit alten Werten verwerfen
+ let ok=false;
+ try{const r=await fetch(url,{method:'POST',body:new URLSearchParams(params||{})});let j={};try{j=await r.json();}catch(e){}
+  ok=r.ok;if(r.ok){if(ids)clean(ids);if(okMsg)toast(okMsg);}
+  else if(r.status==401){showLogin(role>=1,j.err);}
+  else toast(j.err||'Fehler '+r.status,true);}
+ catch(e){toast('Keine Verbindung',true);}
+ refresh();if(role==2)loadCfg();return ok;
+}
+const hm=m=>String(m/60|0).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+const mins=v=>{const p=(v||'0:0').split(':');return p[0]*60+ +p[1];};
+function dur(s){if(s<60)return s+' s';if(s<3600)return(s/60|0)+' min';
+ if(s<86400)return(s/3600|0)+' h '+(s%3600/60|0)+' min';return(s/86400|0)+' T '+(s%86400/3600|0)+' h';}
+const EV=['🔔 Klingeln','🔔 Klingeln (Nachtruhe)','📞 Anruf ausgelöst','🔓 Geöffnet (Web)',
+ '🔓 Geöffnet (Taster)','🔓 Geöffnet (Telefon)','🔓 Geöffnet (Home Assistant)','⚡ Gerät gestartet',
+ '🔓 Automatisch geöffnet (Praxis)','📵 Niemand hat abgehoben','⚠️ Tür zu lange offen',
+ '📲 Anruf an den Türöffner','🔓 Geöffnet (Gästecode)','⛔ Falscher Code'];
+function when(e){
+ if(!e.t)return'vor '+dur(e.a);
+ const d=new Date(e.t*1000);
+ return d.toDateString()==new Date().toDateString()?d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})
+  :d.toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+// Verlauf: zugeklappt nur die neuesten Eintraege, aufgeklappt alle (Wahl wird gemerkt)
+const LOG_SHORT=5;
+let logOpen=false;try{logOpen=localStorage.getItem('logOpen')==='1';}catch(e){}
+function logView(){
+ const items=$('log').children,n=items.length;
+ for(let i=0;i<n;i++)items[i].classList.toggle('hide',!logOpen&&i>=LOG_SHORT);
+ $('logmore').classList.toggle('hide',n<=LOG_SHORT);
+ $('logmore').textContent=logOpen?'▲ Weniger anzeigen':'▼ Alle '+n+' anzeigen';
+ $('logcnt').textContent=n>LOG_SHORT&&!logOpen?LOG_SHORT+' von '+n:'';
+}
+function toggleLog(){logOpen=!logOpen;try{localStorage.setItem('logOpen',logOpen?'1':'0');}catch(e){}logView();}
+// Filter: welche Ereignistypen zu welcher Gruppe gehoeren
+const LOGF={ring:[0,1],open:[3,4,5,6,8,12],call:[2,9,11,13]};
+let logF='',logEv=[];
+function renderLog(){
+ const ul=$('log');ul.textContent='';
+ const ev=logF?logEv.filter(e=>LOGF[logF].includes(e.e)):logEv;
+ if(!ev.length){const li=document.createElement('li');li.textContent=logEv.length?'Keine passenden Ereignisse':'Noch keine Ereignisse';ul.append(li);logView();return;}
+ for(const e of ev){const li=document.createElement('li'),a=document.createElement('span'),t=document.createElement('time');
+  a.textContent=EV[e.e]||'?';if(e.d){const s=document.createElement('small');s.textContent=e.d;a.append(s);}
+  t.textContent=when(e);li.append(a,t);ul.append(li);}
+ logView();
+}
+$('logf').addEventListener('click',e=>{const b=e.target.closest('.chip');if(!b)return;
+ logF=b.dataset.f;for(const c of $('logf').children)c.classList.toggle('on',c===b);renderLog();});
+async function loadLog(){
+ try{const r=await fetch('/log');if(!r.ok)return;logEv=(await r.json()).ev;renderLog();}catch(e){}
+}
+function anim(){
+ const left=Math.max(0,buzEnd-Date.now()),f=left/(buzDur*1000);
+ $('prog').style.strokeDashoffset=490*(1-f);
+ const act=left>0;$('openb').className=act?'open active':'open';
+ $('openl').textContent=act?Math.ceil(left/1000)+' s':'Öffnen';
+ $('openh').classList.toggle('hide',act);
+ if(act)requestAnimationFrame(anim);
+}
+// Oeffnen erst nach 0,8 s gedrueckt halten (gegen versehentliches Antippen);
+// per Tastatur (Enter/Leertaste) sofort
+const HOLD_MS=800;let holdT=null;
+function holdStart(e){
+ if(e.button>0||buzEnd>Date.now())return;
+ e.preventDefault();initAudio();
+ const p=$('prog');p.style.transition='stroke-dashoffset '+HOLD_MS+'ms linear';p.style.strokeDashoffset=0;
+ $('openh').textContent='weiter halten …';
+ holdT=setTimeout(()=>{holdT=null;p.style.transition='';$('openh').textContent='gedrückt halten';
+  try{navigator.vibrate&&navigator.vibrate(60);}catch(x){}openDoor();},HOLD_MS);
+}
+function holdEnd(){
+ if(!holdT)return;clearTimeout(holdT);holdT=null;
+ const p=$('prog');p.style.transition='stroke-dashoffset .2s';p.style.strokeDashoffset=490;
+ $('openh').textContent='gedrückt halten';setTimeout(()=>p.style.transition='',220);
+}
+// SIP-Anmeldung im Klartext
+function sipText(s){
+ if(!s.sipcfg)return['kein Server','off'];
+ const c=s.sipst;
+ if(c==200)return['angemeldet','on'];if(c==-1)return['verbinde …','off'];
+ if(c==0)return['Anlage antwortet nicht','bad'];
+ if(c==401||c==407)return['Benutzer/Passwort falsch','bad'];
+ if(c==403)return['abgelehnt (403)','bad'];if(c==404)return['Benutzer unbekannt (404)','bad'];
+ return['Fehler '+c,'bad'];
+}
+function callText(s){
+ if(s.chain)return['läuft …','warn'];
+ if(s.incall)return['eingehend …','warn'];
+ return[['–','off'],['angenommen','on'],['nicht angenommen','warn'],['besetzt','warn'],['abgelehnt','warn'],['Fehler '+s.lastcode,'bad']][s.lastcall]||['–','off'];
+}
+// Live-Zustand (jede Sekunde, klein)
+let fails=0;
+async function refresh(){
+ try{
+  const g=gen;
+  const r=await fetch('/status');
+  fails=0;$('offline').classList.add('hide');
+  if(r.status==401){   // Tuer ist geschuetzt und niemand angemeldet
+   role=0;$('conn').className='dot on';$('connt').textContent='online';
+   $('logout').classList.add('hide');$('login').classList.add('hide');
+   if($('loginv').classList.contains('hide')||!loginNeeded)showLogin(false);
+   return;
+  }
+  const s=await r.json();
+  if(g!==gen)return;   // waehrenddessen gespeichert -> Antwort ist veraltet
+  if(loginNeeded)hideLogin();
+  role=s.role;$('seg').classList.toggle('hide',role<2);if(role<2&&cur)tab(0);
+  $('login').classList.toggle('hide',role>=2);
+  $('nopw').classList.toggle('hide',!(role==2&&!s.hasweb));
+  $('conn').className='dot on';
+  $('connt').textContent='online'+(s.auth||s.hasweb?' · '+(role==2?'Admin':s.auth?'Tür':'ohne Anmeldung'):'');
+  $('logout').classList.toggle('hide',!s.auth);
+  flag('sig',s.signal,'aktiv','ruhig');flag('buz',s.buzzer,'an','aus');flag('reg',s.registered,'ok','nein');
+  $('reg').title=sipText(s)[0];
+  $('rings').textContent=s.signals;$('cnt').textContent=s.triggers;$('calls').textContent=s.calls;
+  if(!s.door)txt('doorst','–','off');else if(s.door==2)txt('doorst',s.dooralert?'offen!':'offen',s.dooralert?'bad':'warn');else txt('doorst','zu','on');
+  txt('mode',s.praxisnow?'Praxis':s.quietnow?'Nachtruhe':'Normal',s.praxisnow||s.quietnow?'warn':'');
+  const lc=callText(s);txt('lastc',lc[0],lc[1]);if(s.lastnr)$('lastc').title='an '+s.lastnr;
+  $('doorc').className=s.ringing?'card ringing':'card';
+  if(s.ringing&&!wasRinging){if(soundOn)beep();try{navigator.vibrate&&navigator.vibrate([300,150,300,150,300]);}catch(e){}}
+  wasRinging=s.ringing;
+  document.title=s.ringing?'🔔 Es klingelt – Türöffner':'Türöffner';
+  buzDur=s.seconds;
+  if(s.buzzer&&buzEnd<Date.now()){buzEnd=Date.now()+s.seconds*1000;anim();}
+  if(!s.buzzer&&buzEnd>Date.now()){buzEnd=0;anim();}
+  const nrs=s.dial.split(/[,; ]+/).filter(x=>x).join(' → ');
+  $('hint').textContent=s.ringing?'🔔 Es klingelt!':s.incall?'📲 Anruf am Türöffner – wartet auf Code'
+   :s.praxisnow?'🏥 Praxis-Modus – Klingeln öffnet automatisch'
+   :!nrs?'Keine Zielnummer eingestellt':!s.callonring?'Anruf beim Klingeln ist aus'
+   :s.quietnow?'🌙 Nachtruhe – Klingeln ruft nicht an':'Klingeln ruft '+nrs+' an – '+(s.haspin?'Code':'*')+' am Telefon öffnet';
+  if(s.logn!==logN){logN=s.logn;loadLog();}
+  if(role<2)return;   // Tuer-Zugang / ohne Anmeldung: keine Einstellungen
+  setVal('dur',s.seconds);setVal('dial',s.dial);setChk('auto',s.callonring);
+  setChk('qon',s.quiet);setChk('pon',s.praxis);setChk('inon',s.incoming);
+  $('qnote').textContent=!s.ntp?'Uhrzeit noch nicht abgeglichen – greift erst danach.'
+   :(s.quietnow?'Gerade aktiv. ':'')+'Klingeln wird weiter gezählt, protokolliert und gemeldet.';
+  if(!s.incoming)txt('inst','aus','off');else if(s.inlock)txt('inst','gesperrt ('+Math.ceil(s.inlock/60)+' min)','bad');
+  else if(s.inready)txt('inst','bereit','on');else txt('inst','nicht bereit','warn');
+  $('innote').textContent=!s.incoming?'Wer den Türöffner anruft, hört einen kurzen Ton und tippt den Öffnen-Code oder einen Gästecode.'
+   :s.inlock?'Zu viele falsche Codes – Anrufe werden vorübergehend abgelehnt.'
+   :s.inready?'Rufnummer: Nebenstelle '+(cfg.sipuser||'des Türöffners')+'. Nach dem Ton Code eintippen.'
+   :!s.registered?'Nicht bereit: SIP ist nicht angemeldet.':'Nicht bereit: weder Öffnen-Code noch gültiger Gästecode gesetzt.';
+  const st=sipText(s);txt('sipst',st[0],st[1]);
+  txt('pushst',!s.ptype?'aus':s.pcode==0?'bereit':s.pcode>=200&&s.pcode<300?'zuletzt ok':'Fehler '+s.pcode,
+   !s.ptype||s.pcode==0?'off':s.pcode>=200&&s.pcode<300?'on':'bad');
+  if(s.mqttcfg)flag('mqst',s.mqtt,'verbunden','getrennt');else txt('mqst','aus','off');
+  $('sysup').textContent=dur(s.up);
+  $('systime').textContent=s.ntp?new Date(s.now*1000).toLocaleString('de-DE'):'nicht abgeglichen';
+  $('sysrssi').textContent=s.rssi+' dBm ('+(s.rssi>-60?'gut':s.rssi>-75?'mittel':'schwach')+')';
+  $('sysheap').textContent=Math.round(s.heap/1024)+' KB (größter Block '+Math.round(s.maxblk/1024)+' KB)';
+  if(cur&&Date.now()-cfgAt>30000)loadCfg();
+ }catch(e){$('conn').className='dot off';$('connt').textContent='offline';
+  if(++fails>=3)$('offline').classList.remove('hide');}
+}
+// Einstellungen (nur Admin; beim Start, nach dem Speichern und alle 30 s im offenen Tab)
+async function loadCfg(){
+ try{
+  const g=gen;cfgAt=Date.now();
+  const c=await(await fetch('/config')).json();
+  if(g!==gen)return;cfg=c;
+  setVal('pin',c.pin);
+  setVal('qfrom',hm(c.qfrom));setVal('qto',hm(c.qto));
+  setVal('pfrom',hm(c.pfrom));setVal('pto',hm(c.pto));setVal('pfrom2',hm(c.pfrom2));setVal('pto2',hm(c.pto2));setVal('pfree',c.pfree);
+  for(let i=0;i<7;i++)setChk('pd'+i,!!(c.pdays&(1<<i)));
+  if(!gDirty)renderGuests(c.guests);
+  setChk('don',c.dooron);setChk('dinv',c.doorinv);setVal('dalert',c.dooralertmin);
+  $('dnote').textContent='Reed-Kontakt zwischen '+c.doorpin+' und GND, geschlossen = Tür zu.';
+  setVal('sipserver',c.sipserver);setVal('sipport',c.sipport);setVal('sipuser',c.sipuser);
+  $('sippw').placeholder=c.haspw?'unverändert':'nicht gesetzt';
+  setVal('ptype',c.ptype);setVal('pserver',c.pserver);setVal('ptopic',c.ptopic);
+  $('ptoken').placeholder=c.haspt?'unverändert':'nicht gesetzt';
+  for(const b of[1,2,4])setChk('pev'+b,!!(c.pev&b));pushForm();
+  setVal('mqserver',c.mqttserver);setVal('mqport',c.mqttport);setVal('mquser',c.mqttuser);
+  $('mqpw').placeholder=c.hasmqttpw?'unverändert':'nicht gesetzt';
+  $('mqid').textContent=c.mqttid;$('mqbase').textContent=c.mqttbase;
+  setVal('syslog',c.syslog);
+  $('sysaddr').textContent=c.host+'.local · '+c.ip;$('sysver').textContent=c.ver;$('sysboot').textContent=c.boot;
+  setChk('nstatic',c.nstatic);setVal('nip',c.nip);setVal('nmask',c.nmask);setVal('ngw',c.ngw);setVal('ndns',c.ndns);netForm();
+  $('apname').textContent=c.apname;
+  if(!c.apset)txt('apst','offen','bad');else if(c.apdefault)txt('apst','Standard','warn');else txt('apst','eigenes','on');
+  $('apnote').textContent='Dieses WLAN öffnet das Gerät nur, wenn das bekannte WLAN fehlt. Mindestens 8 Zeichen.'
+   +(c.apdefault?' Das Standard-Passwort steht öffentlich im Quelltext – bitte ändern.':'');
+  setVal('webuser',c.webuser);flag('webst',c.hasweb,'geschützt','offen');$('weboff').classList.toggle('hide',!c.hasweb);
+  $('webnote').textContent='Darf alles. OTA-Updates aus PlatformIO sind nur mit Passwort aktiv'+(c.ota?' (gerade aktiv).':' – nach dem Setzen einmal neu starten.');
+  setVal('opuser',c.opuser);flag('opst',c.hasop,'geschützt','offen');$('opoff').classList.toggle('hide',!c.hasop);
+ }catch(e){}
+}
+// Gaestecodes: "Code:bisUnix:einmalig:Name;..."
+function localDt(t){if(!t)return'';const d=new Date(t*1000);d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16);}
+function guestRow(code,until,once,name){
+ const d=document.createElement('div');d.className='guest'+(until&&until*1000<Date.now()?' exp':'');
+ d.innerHTML='<div class="half"><input type="text" class="gn" maxlength="16" placeholder="Name (z. B. Paketdienst)">'
+  +'<input type="text" class="gc" inputmode="numeric" maxlength="8" placeholder="Code" autocomplete="off"></div>'
+  +'<input type="datetime-local" class="gu" title="gültig bis (leer = unbegrenzt)">'
+  +'<div class="gl"><label><input type="checkbox" class="go"> einmalig</label><span class="gs"></span>'
+  +'<button class="x" type="button">Entfernen</button></div>';
+ d.querySelector('.gn').value=name;d.querySelector('.gc').value=code;d.querySelector('.gu').value=localDt(until);
+ d.querySelector('.go').checked=once;
+ d.querySelector('.gs').textContent=until?(until*1000<Date.now()?'abgelaufen':'gültig bis '+new Date(until*1000).toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})):'unbegrenzt';
+ d.querySelector('.x').onclick=()=>{d.remove();gDirty=true;due($('glist'));guestBtn();};
+ $('glist').append(d);
+}
+function guestBtn(){$('gadd').classList.toggle('hide',$('glist').children.length>=5);}
+function renderGuests(str){$('glist').textContent='';
+ for(const e of(str||'').split(';').filter(x=>x)){const p=e.split(':');guestRow(p[0],+p[1],p[2]=='1',p.slice(3).join(':'));}
+ guestBtn();}
+function addGuest(){guestRow('',0,false,'');gDirty=true;due($('glist'));guestBtn();$('glist').lastChild.querySelector('.gn').focus();}
+function collectGuests(){
+ const out=[];
+ for(const d of $('glist').children){
+  const c=d.querySelector('.gc').value.trim(),n=d.querySelector('.gn').value.trim().replace(/[:;]/g,' ');
+  const u=d.querySelector('.gu').value,o=d.querySelector('.go').checked;
+  if(!c&&!n)continue;
+  if(!/^\d{4,8}$/.test(c))throw'Gästecode „'+(n||c)+'“: 4–8 Ziffern';
+  out.push(c+':'+(u?Math.floor(new Date(u).getTime()/1000):0)+':'+(o?1:0)+':'+n);
+ }
+ return out.join(';');
+}
+function pushForm(){const t=$('ptype').value;$('pbox').classList.toggle('hide',t=='0');
+ $('pserverbox').classList.toggle('hide',t!='1');
+ $('ptopicl').textContent=t=='2'?'Chat-ID':'Topic';
+ $('ptokenl').textContent=t=='2'?'Bot-Token':'Zugangs-Token (optional)';
+ $('pnote').textContent=t=='1'?'App „ntfy“ installieren und dasselbe Topic abonnieren. Topic schwer erratbar wählen.'
+  :t=='2'?'Bot über @BotFather anlegen; Chat-ID z. B. über @userinfobot.':'';}
+function netForm(){$('nbox').classList.toggle('hide',!$('nstatic').checked);}
+function openDoor(){buzEnd=Date.now()+buzDur*1000;anim();post('/open','Tür wird geöffnet');}
+function saveGeneral(){
+ post('/setdial','Gespeichert',['dur','dial','pin','auto'],{s:$('dur').value,nr:$('dial').value,pin:$('pin').value,auto:$('auto').checked?1:0});
+}
+function saveIncoming(){
+ let g;try{g=collectGuests();}catch(e){toast(e,true);return;}
+ post('/setincoming','Gespeichert',['inon'],{on:$('inon').checked?1:0,guests:g}).then(ok=>{if(ok){gDirty=false;$('gadd').closest('.card').querySelector('.pri').classList.remove('due');}});
+}
+function testCall(){post('/call','Anruf wird aufgebaut');}
+function saveSip(){
+ const p={server:$('sipserver').value,port:$('sipport').value,user:$('sipuser').value,pw:$('sippw').value};
+ $('sippw').value='';post('/setsip','Gespeichert – registriere neu',['sipserver','sipport','sipuser','sippw'],p);
+}
+function saveMqtt(){
+ const p={server:$('mqserver').value,port:$('mqport').value,user:$('mquser').value,pw:$('mqpw').value};
+ $('mqpw').value='';post('/setmqtt','Gespeichert – verbinde',['mqserver','mqport','mquser','mqpw'],p);
+}
+function saveSyslog(){post('/setsyslog','Gespeichert',['syslog'],{server:$('syslog').value});}
+function saveQuiet(){
+ post('/setquiet','Gespeichert',['qon','qfrom','qto'],{on:$('qon').checked?1:0,from:mins($('qfrom').value),to:mins($('qto').value)});
+}
+function savePraxis(){
+ let d=0;for(let i=0;i<7;i++)if($('pd'+i).checked)d|=1<<i;
+ post('/setpraxis','Gespeichert',['pon','pfrom','pto','pfrom2','pto2','pfree','pd0','pd1','pd2','pd3','pd4','pd5','pd6'],
+  {on:$('pon').checked?1:0,days:d,from:mins($('pfrom').value),to:mins($('pto').value),
+   from2:mins($('pfrom2').value),to2:mins($('pto2').value),free:$('pfree').value});
+}
+function saveDoor(){
+ post('/setdoor','Gespeichert',['don','dinv','dalert'],{on:$('don').checked?1:0,inv:$('dinv').checked?1:0,alert:$('dalert').value||0});
+}
+function savePush(){
+ let ev=0;for(const b of[1,2,4])if($('pev'+b).checked)ev|=b;
+ const p={type:$('ptype').value,server:$('pserver').value,topic:$('ptopic').value,token:$('ptoken').value,ev};
+ $('ptoken').value='';post('/setpush','Gespeichert',['ptype','pserver','ptopic','ptoken','pev1','pev2','pev4'],p);
+}
+function testPush(){post('/testpush','Test-Mitteilung wird gesendet');setTimeout(refresh,4000);}
+function saveNet(){
+ const st=$('nstatic').checked,ip=$('nip').value;
+ if(!confirm(st?'Feste IP '+ip+' übernehmen und neu starten?\nDanach ist das Gerät unter http://'+ip+' erreichbar.'
+  :'Wieder DHCP verwenden und neu starten?\nDie Adresse kann sich ändern – dann über tueroeffner.local aufrufen.'))return;
+ post('/setnet','Startet neu …',['nstatic','nip','nmask','ngw','ndns'],{static:st?1:0,ip,mask:$('nmask').value,gw:$('ngw').value,dns:$('ndns').value})
+  .then(ok=>{if(ok)setTimeout(()=>location.href=st?'http://'+ip+'/':'/',15000);});
+}
+function saveAp(){
+ const p=$('appw').value;if(p.length<8){toast('Mindestens 8 Zeichen',true);return;}
+ $('appw').value='';post('/setap','Passwort gesetzt',['appw'],{pw:p});
+}
+function apOpen(){if(confirm('Einrichtungs-WLAN ohne Passwort betreiben?\nDann kann sich jeder in Funkreichweite verbinden, solange es offen ist.'))post('/setap','Einrichtungs-WLAN ist offen',['appw'],{pw:''});}
+function saveWeb(){
+ const p=$('webpw').value;
+ if(!$('webuser').value||!p){toast('Benutzer und Passwort eingeben',true);return;}
+ if(p!==$('webpw2').value){toast('Passwörter sind verschieden',true);return;}
+ const q={user:$('webuser').value,pw:p};
+ $('webpw').value=$('webpw2').value='';
+ post('/setweb','Passwort gesetzt – bitte neu anmelden',['webuser','webpw','webpw2'],q);
+}
+function webOff(){if(confirm('Passwortschutz wirklich entfernen?\nDas Tür-Passwort wird dabei ebenfalls entfernt.'))post('/setweb','Passwortschutz entfernt',null,{off:1});}
+function saveOp(){
+ const p=$('oppw').value;
+ if(!$('opuser').value||!p){toast('Benutzer und Passwort eingeben',true);return;}
+ const q={user:$('opuser').value,pw:p};$('oppw').value='';
+ post('/setop','Tür-Passwort gesetzt',['opuser','oppw'],q);
+}
+function opOff(){if(confirm('Tür-Passwort entfernen?\nDann kann jeder im WLAN die Tür ohne Anmeldung öffnen.'))post('/setop','Tür-Passwort entfernt',null,{off:1});}
+function restart(){if(confirm('Gerät neu starten?')){post('/restart','Startet neu …');setTimeout(()=>location.reload(),12000);}}
+function resetCounters(){if(confirm('Zähler für Klingeln, Öffnungen und Anrufe auf 0 setzen?'))post('/resetcounters','Zähler zurückgesetzt');}
+function wifiReset(){
+ if(confirm('WLAN-Zugangsdaten löschen?\nDanach öffnet das Gerät das WLAN „'+(cfg.apname||'Tueroeffner-Setup')+'“ zur Neueinrichtung.'))
+  post('/wifireset','WLAN wird zurückgesetzt');
+}
+// Sicherung per fetch laden (mit Kennzeichnung) und als Datei speichern
+async function backup(){
+ try{
+  const r=await fetch('/backup');
+  if(r.status==401){showLogin(true,'Bitte als Admin anmelden.');return;}
+  if(!r.ok){toast('Fehler '+r.status,true);return;}
+  const cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename="([^"]+)"/);
+  const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());
+  a.download=m?m[1]:'tueroeffner.json';document.body.append(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+ }catch(e){toast('Keine Verbindung',true);}
+}
+async function restore(){
+ const f=$('rs').files[0];if(!f){toast('Bitte Sicherungsdatei auswählen',true);return;}
+ let j;try{j=JSON.parse(await f.text());}catch(e){toast('Keine gültige Sicherung',true);return;}
+ if(!j.tueroeffner){toast('Keine Sicherung vom Türöffner',true);return;}
+ if(!confirm('Einstellungen aus der Sicherung übernehmen?\nDas Gerät startet danach neu.'))return;
+ const b={};for(const k in j)if(k!='tueroeffner'&&k!='fw')b[k]=j[k];
+ if(await post('/restore','Eingespielt – startet neu …',null,b))setTimeout(()=>location.reload(),15000);
+}
+function upload(){
+ const f=$('fw').files[0];if(!f){toast('Bitte firmware.bin auswählen',true);return;}
+ const fd=new FormData(),x=new XMLHttpRequest();fd.append('firmware',f,f.name);
+ $('fwbar').style.display='block';$('fwprog').style.width='0';
+ x.upload.onprogress=e=>{if(e.lengthComputable)$('fwprog').style.width=(e.loaded/e.total*100)+'%';};
+ x.onload=()=>{
+  if(x.status==200){toast('Update installiert – Neustart …');setTimeout(()=>location.reload(),15000);return;}
+  let m='Update fehlgeschlagen';try{m=JSON.parse(x.responseText).err||m;}catch(e){}
+  toast(m,true);$('fwbar').style.display='none';
+ };
+ x.onerror=()=>{toast('Upload abgebrochen',true);$('fwbar').style.display='none';};
+ x.open('POST','/update');x.setRequestHeader('X-Tueroeffner','1');x.send(fd);
+}
+// Auge an allen Passwortfeldern: Eingabe anzeigen/verbergen
+const EYE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+for(const i of document.querySelectorAll('input[type=password]')){
+ const w=document.createElement('div');w.className='pw';i.parentNode.insertBefore(w,i);w.append(i);
+ const b=document.createElement('button');b.type='button';b.className='eye';b.title='Passwort anzeigen';b.innerHTML=EYE;
+ b.onclick=()=>{const sh=i.type==='password';i.type=sh?'text':'password';b.title=sh?'Passwort verbergen':'Passwort anzeigen';b.style.color=sh?'var(--acc)':'';};
+ w.append(b);
+}
+if(location.hash=='#anmelden')showLogin(true);
+setInterval(refresh,1000);refresh().then(()=>{
+ const n=TABS.indexOf(location.hash.slice(1));
+ if(n>0&&role==2)tab(n);else if(role==2)loadCfg();
+});
+setInterval(loadLog,60000);   // relative Zeitangaben aktuell halten
+</script>
+</body></html>

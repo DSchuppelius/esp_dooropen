@@ -2,11 +2,11 @@
 
    Copyright (c) 2018 Juergen Liegner  All rights reserved.
    (https://www.mikrocontroller.net/topic/444994)
-   
+
    Copyright (c) 2019 Thorsten Godau (dl9sec)
    (Created an Arduino library encapsulation from the original code and did
    some beautification)
-   
+
    Redistribution and use in source and binary forms, with or without
    modification, are permitted provided that the following conditions
    are met:
@@ -46,18 +46,18 @@
 #endif
 
 #include <WiFiUdp.h>
-   
+
 class Sip
 {
   public:
     Sip(char *pBuf, size_t lBuf);
 	~Sip();
-    
-	
+
+
 	void        Init(const char *SipIp, int SipPort, const char *MyIp, int MyPort, const char *SipUser, const char *SipPassWd, int MaxDialSec = 10);
     bool        Dial(const char *DialNr, const char *DialDesc = "");
 	void		Processing(char *pBuf, size_t lBuf);
-    bool        IsBusy() { return iRingTime != 0; }	
+    bool        IsBusy() { return iRingTime != 0; }
     // Nicht-blockierendes REGISTER mit Digest-Auth; Ergebnis per IsRegistered(),
     // sobald IsRegistering() false ist (Antworten laufen ueber Processing()). (Erweiterung)
     void        StartRegister(int Expires = 3600);
@@ -75,25 +75,39 @@ class Sip
     // Ergebnis der letzten Registrierung: -1 = noch keine, 0 = keine Antwort,
     // sonst SIP-Statuscode (200 = ok, 401 nach Digest = Zugangsdaten falsch, ...)
     int         RegisterStatus() { return iRegStatus; }
+    // Vom Registrar gewaehrte Gueltigkeit (s) der letzten Registrierung, 0 = unbekannt
+    int         RegisterExpires() { return iRegGranted; }
     // Ergebnis des letzten Anrufs (gueltig, sobald IsBusy() false ist)
     enum CallResult { CALL_NONE, CALL_ANSWERED, CALL_NOANSWER, CALL_BUSY, CALL_DECLINED, CALL_FAILED };
     CallResult  LastCallResult() { return eCallResult; }
     int         LastCallCode() { return iCallCode; }   // SIP-Code bei CALL_FAILED
 
+    // Eingehende Anrufe (Erweiterung): angenommen wird nur, wenn erlaubt und
+    // kein anderer Anruf laeuft. Nach dem Annehmen kurzer Ton, dann Code-Eingabe.
+    void        SetAcceptIncoming(bool on) { bAcceptIncoming = on; }
+    void        SetIncomingSeconds(int s) { iIncomingSeconds = s; }
+    bool        IsIncoming() { return bIncoming && iRingTime != 0; }
+    // true genau einmal nach dem Annehmen eines Anrufs; Nummer des Anrufers in IncomingFrom()
+    bool        NewIncoming() { bool b = bNewIncoming; bNewIncoming = false; return b; }
+    const char *IncomingFrom() { return caInCaller; }
+
   private:
     char       *pbuf;
     size_t      lbuf;
-    char        caRead[256];
+    char        caRead[512];      // Call-ID/From/Via/To fuer BYE eines ausgehenden Anrufs
+    char        caAuth[512];      // fertiger (Proxy-)Authorization-Header
     bool        bRegistered = false;
 
     // REGISTER-Zustand (Erweiterung)
     bool        bRegPending = false;
+    bool        bRegAuthTried = false;
     uint32_t    regSentAt = 0;
     uint32_t    regCallId = 0;
     uint32_t    regTag = 0;
-    int         iRegCSeq = 1;
+    int         iRegCSeq = 0;
     int         iRegExpires = 3600;
     int         iRegStatus = -1;
+    int         iRegGranted = 0;
 
     // Anruf-Ergebnis / Gespraechsdauer (Erweiterung)
     CallResult  eCallResult = CALL_NONE;
@@ -102,6 +116,7 @@ class Sip
 
     const char *pSipIp;
     int         iSipPort;
+    IPAddress   sipAddr;          // aufgeloeste Server-Adresse (Absenderpruefung)
     const char *pSipUser;
     const char *pSipPassWd;
     const char *pMyIp;
@@ -117,11 +132,30 @@ class Sip
     uint32_t    iRingTime;
     uint32_t    iMaxTime;
     int         iDialRetries;
-    int         iLastCSeq;
     int         iInviteCSeq = 1;
     bool        bAnswered = false;
+    bool        bGotResponse = false;   // Antwort auf INVITE da -> nicht mehr wiederholen
 
 	WiFiUDP 	Udp;
+
+    // Eingehender Anruf (Erweiterung)
+    bool        bAcceptIncoming = false;
+    bool        bIncoming = false;
+    bool        bNewIncoming = false;
+    int         iIncomingSeconds = 30;
+    char        caInCallId[100];
+    char        caInFrom[160];      // From des Anrufers (mit dessen Tag)
+    char        caInTo[160];        // To ohne unseren Tag
+    char        caInVia[400];       // alle Via-Zeilen der letzten Anfrage (mit CRLF)
+    char        caInContact[120];   // Ziel fuer unser BYE
+    char        caInCaller[32];     // Rufnummer fuer das Protokoll
+    int         iInCSeq = 0;
+    int         iInByeCSeq = 1;
+    uint32_t    inTag = 0;
+    bool        bInAckPending = false;
+    uint32_t    inOkSentAt = 0;
+    uint32_t    inOkInterval = 500;
+    uint32_t    inOkFirstAt = 0;
 
     // RTP / Beep-Audio (Erweiterung)
     WiFiUDP     Rtp;
@@ -137,38 +171,56 @@ class Sip
     uint32_t    rtpSsrc = 0;
     uint32_t    rtpFrame = 0;
     int         iBeepSeconds = 0;
+    int         iStreamBeepSec = 0;   // Beep-Dauer des laufenden Gespraechs
     uint8_t     ulawTone[8];
     uint8_t     alawTone[8];
     bool        bToneReady = false;
     uint8_t     rtpPt = 0;        // ausgehandelter Codec: 0 = PCMU, 8 = PCMA
     uint8_t     dtmfPt = 101;     // telephone-event Payload Type laut Antwort
     char        cLastDtmf = 0;
-    uint32_t    lastDtmfAt = 0;
-	
-	void        HandleUdpPacket(const char *p);
+    uint32_t    lastDtmfTs = 0;   // RTP-Zeitstempel des letzten DTMF-Ereignisses
+    bool        bDtmfTsValid = false;
+
+	void        HandleUdpPacket(const char *p, bool fromServer);
 	void        AddSipLine(const char* constFormat , ... );
     bool        AddCopySipLine(const char *p, const char *psearch);
+    void        AddCopyAllLines(const char *p, const char *psearch);
     bool        ParseParameter(char *dest, int destlen, const char *name, const char *line, char cq = '\"');
     bool        ParseReturnParams(const char *p);
     int         GrepInteger(const char *p, const char *psearch);
     bool        IsResponseTo(const char *p, const char *method);
     bool        IsCallId(const char *p, uint32_t id32);
-    void        SendRegister(const char *pAuth);
+    bool        IsCallIdStr(const char *p, const char *id);
+    bool        IsRequest(const char *p, const char *method);
+    bool        HeaderValue(const char *p, const char *name, char *dest, size_t destlen);
+    bool        BuildAuth(const char *p, const char *method, const char *uri);
+    void        SendRegister(bool withAuth);
     void        HandleRegisterResponse(const char *p);
     void        Ack(const char *pIn);
     void        Cancel();
     void        Bye(int cseq);
-    void        Ok(const char *pIn);
+    void        Respond(const char *pIn, int code, const char *reason);
     void        Invite(const char *pIn = 0);
+
+    // Eingehender Anruf (Erweiterung)
+    void        HandleIncomingInvite(const char *p);
+    bool        ParseOffer(const char *p);
+    void        SendIncomingOk();
+    void        ByeIncoming();
+    int         BuildSdp(char *out, size_t len, bool offer);
 
     uint32_t    Millis();
     uint32_t    Random();
     int         SendUdp();
-    void        MakeMd5Digest(char *pOutHex33, char *pIn);
+    void        MakeMd5Digest(char *pOutHex33, const char *pIn);
 
     // RTP / Beep-Helfer (Erweiterung)
-    int         TalkSeconds() { return iCallSeconds > iBeepSeconds ? iCallSeconds : iBeepSeconds; }
+    int         TalkSeconds() {
+      if ( bIncoming ) return iIncomingSeconds;
+      return iCallSeconds > iBeepSeconds ? iCallSeconds : iBeepSeconds;
+    }
     void        StartRtp(const char *pIn);
+    void        StartStream(int beepSec);
     void        StopCall();
     void        RtpProcessing();
     void        SendRtpFrame();
