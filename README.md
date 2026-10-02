@@ -1,12 +1,13 @@
 # esp_dooropen
 
-SIP-Türöffner für **ESP32 DevKit (WROOM-32)** oder **ESP8266 HW-364A** (NodeMCU mit
-fest verbautem OLED). Klingelt es, ruft der ESP per SIP ein Telefon an; mit **`*`** (oder einem Code) am
+SIP-Türöffner für **ESP32 DevKit (WROOM-32)**, **WT32-ETH01** (ESP32 mit Ethernet) oder
+**ESP8266 HW-364A** (NodeMCU mit fest verbautem OLED). Klingelt es, ruft der ESP per SIP ein Telefon an; mit **`*`** (oder einem Code) am
 Telefon, über die **Weboberfläche**, per **Taster** oder aus **Home Assistant** wird die
 Tür geöffnet.
 
-Die Zielplattform wird über die PlatformIO-Umgebung gewählt (`esp32dev` bzw.
-`nodemcuv2`); der Code passt sich per Präprozessor-Weiche automatisch an.
+Die Zielplattform wird über die PlatformIO-Umgebung gewählt (siehe
+[Bauen & Flashen](#bauen--flashen-platformio)); der Code passt sich per
+Präprozessor-Weiche automatisch an.
 
 ## Funktionen
 
@@ -22,6 +23,8 @@ Die Zielplattform wird über die PlatformIO-Umgebung gewählt (`esp32dev` bzw.
     oder ein **Öffnen-Code** (z. B. `1234`), dann bleibt das Gespräch 30 s offen,
   - wird nicht abgehoben, wird der Anruf nach 15 s per `CANCEL` zurückgezogen,
   - **SIP-Status im Klartext** und Ergebnis des letzten Anrufs.
+- **Klingeln per Anruf**: Eine TK-Anlage (z. B. OpenCom) ruft beim Klingeln den
+  Türöffner an – er nimmt nicht ab und wertet das als Klingeln. Ganz ohne Verdrahtung.
 - **Anrufe an den Türöffner** (optional): Wer die Nebenstelle des Türöffners anruft,
   hört einen kurzen Ton und tippt den Öffnen-Code oder einen **Gästecode**
   (bis zu 5, mit Name, Ablaufdatum und „einmalig“). Nach mehreren falschen Codes
@@ -34,23 +37,36 @@ Die Zielplattform wird über die PlatformIO-Umgebung gewählt (`esp32dev` bzw.
   Display gefunden, läuft alles ohne.
 - **Status-LED** mit Blinkmustern (Summer, WLAN-Einrichtung, kein WLAN, SIP fehlt).
 - **Taster** vor Ort: Klingel-Taster (wirkt wie Klingeln) und Summer-Taster (öffnet).
-- **Zwei Zugänge** mit eigener Anmeldeseite: Admin (alles) und Tür-Zugang (nur öffnen und
-  Verlauf sehen, z. B. für den Kunden; ohne Tür-Passwort ist die Tür offen). Ohne
-  Admin-Passwort warnt die Oberfläche deutlich.
+- **Zweites Relais** (Tor, Garage, zweite Tür) mit eigenem Knopf, eigener Dauer und
+  wahlweise auch für den Tür-Zugang.
+- **Tastenfeld / RFID-Leser** (Wiegand, ESP32): Öffnen-Code oder Gästecode am
+  Tastenfeld, Karten/Chips mit Namen; Sperre nach Fehlversuchen.
+- **Telegram-Bot** (ESP32): Klingel-Mitteilung mit Knopf **„Öffnen“**, Befehle
+  `/status` und `/oeffnen` – auch unterwegs, ohne Portfreigabe.
+- **Apple Home** (HomeKit, eigene ESP32-Variante): Türschloss mit Türklingel direkt in
+  der Home-App, ohne Home Assistant.
+- **Zugänge** mit eigener Anmeldeseite: Admin (alles) und Tür-Zugang (nur öffnen und
+  Verlauf sehen, z. B. für den Kunden; ohne Tür-Passwort ist die Tür offen), dazu bis
+  zu 8 **weitere Benutzer** mit Rolle und Zeitfenster – der Verlauf zeigt, wer
+  geöffnet hat. Ohne Admin-Passwort warnt die Oberfläche deutlich.
 - **Firmware-Update über WLAN**: per Browser-Upload oder aus PlatformIO (OTA, nur
   mit Admin-Passwort).
 - **Erreichbar unter `http://tueroeffner.local`** (mDNS).
 - **Verlauf** der letzten 30 Ereignisse mit Uhrzeit (NTP) und Detail (z. B. Name des
-  Gästecodes, Nummer des Anrufers); **übersteht Neustarts**.
+  Gästecodes, Nummer des Anrufers, Benutzer); **übersteht Neustarts**. Dazu ein langer
+  Verlauf (mehrere Tausend Einträge) im Flash, als **CSV** herunterladbar.
 - **Nachtruhe**: in einem Zeitfenster beim Klingeln nicht anrufen.
 - **Praxis-Modus**: an gewählten Wochentagen in **zwei Zeitfenstern** öffnet Klingeln
-  die Tür automatisch (ohne Anruf); **Ausnahmetage** (Feiertage, Urlaub) einstellbar.
+  die Tür automatisch (ohne Anruf); **gesetzliche Feiertage je Bundesland** werden
+  automatisch berücksichtigt, weitere **Ausnahmetage** (Urlaub) einstellbar.
 - **Türkontakt** (Reed): Tür offen/zu im Web und in Home Assistant, Meldung, wenn die
-  Tür zu lange offen steht.
+  Tür zu lange offen steht, und Prüfung, ob nach dem Summer wirklich jemand
+  hereinkam („Tür nach Summer geöffnet“ / „Summer, Tür blieb zu“).
 - **Push-Mitteilungen ohne Home Assistant** über **ntfy** oder **Telegram**
   (Klingeln, Öffnen, Tür zu lange offen, Sperre nach falschen Codes).
 - **Syslog**: Meldungen und Ereignisse an einen Syslog-Server (Fehlersuche aus der Ferne).
-- **Selbstheilung**: Neustart, wenn das WLAN 10 min weg ist, der Speicher knapp oder
+- **Ethernet** statt WLAN mit dem WT32-ETH01 (z. B. per PoE versorgt).
+- **Selbstheilung**: Neustart, wenn das Netzwerk 10 min weg ist, der Speicher knapp oder
   zerstückelt ist oder das Programm hängt (Watchdog auf beiden Boards); der Grund des
   letzten Starts wird angezeigt.
 - **Neue IP per DHCP** wird erkannt, SIP meldet sich dann sofort neu an.
@@ -81,6 +97,9 @@ Hier gelten echte GPIO-Nummern. Ein OLED ist optional.
 | Status-LED           | GPIO2    | onboard oder extern, siehe [Status-LED](#status-led) |
 | OLED SDA (optional)  | GPIO21   | nur falls ein Display genutzt wird       |
 | OLED SCL (optional)  | GPIO22   | nur falls ein Display genutzt wird       |
+| Relais 2 (optional)  | GPIO13   | zweites Relais (Tor, Garage …)           |
+| Wiegand D0 (optional)| GPIO18   | Tastenfeld/RFID-Leser, siehe unten       |
+| Wiegand D1 (optional)| GPIO19   | Tastenfeld/RFID-Leser, siehe unten       |
 
 ### ESP8266 HW-364A
 
@@ -97,6 +116,47 @@ Das OLED ist auf dem HW-364A **fest verdrahtet** an D5/D6.
 | Klingel-Taster      | D7 (GPIO13) | Taster gegen GND, wirkt wie Klingeln     |
 | Summer-Taster       | D3 (GPIO0)  | gegen GND; Boot-Pin, nicht beim Start    |
 | Türkontakt (opt.)   | RX (GPIO3)  | Reed gegen GND; beim USB-Flashen offen   |
+| Relais 2 (opt.)     | D0 (GPIO16) | zweites Relais (Tor, Garage …)           |
+
+Tastenfeld/RFID (Wiegand) gibt es auf dem ESP8266 nicht – dafür sind keine Pins frei.
+
+### WT32-ETH01 (Ethernet)
+
+Umgebung `wt32-eth01`. Netzwerk über das eingebaute LAN8720 (kein WLAN, keine
+WLAN-Einrichtung; feste IP wie gewohnt in der Weboberfläche). IO35/IO36/IO39 sind
+reine Eingänge **ohne** internen Pull-up.
+
+| Funktion             | Pin   | Hinweis                                       |
+|----------------------|-------|-----------------------------------------------|
+| Relais (Summer)      | IO4   | active-high                                   |
+| Klingel-Kontakt      | IO32  | gegen GND                                     |
+| Klingel-Taster       | IO33  | gegen GND                                     |
+| Summer-Taster        | IO12  | gegen GND (Strapping-Pin: nie auf 3,3 V ziehen) |
+| Türkontakt           | IO2   | gegen GND                                     |
+| Status-LED           | IO17  | LED mit 330 Ω gegen GND                        |
+| Relais 2             | IO5   |                                               |
+| Wiegand D0 / D1      | IO35 / IO36 | Pull-up bzw. Pegelwandler nötig         |
+| OLED SDA / SCL       | IO15 / IO14 | optional                                |
+
+### Tastenfeld / RFID-Leser (Wiegand)
+
+Viele Zutritts-Tastenfelder und Kartenleser haben eine **Wiegand-Schnittstelle**
+(Leitungen D0, D1, GND). Erkannt werden Tastendrücke (4 bzw. 8 Bit) und Karten
+(26 Bit mit Parität, 34 Bit).
+
+```text
+Leser D0 (grün) ──[Pegelwandler]── GPIO18     Leser GND ── GND
+Leser D1 (weiß) ──[Pegelwandler]── GPIO19     Leser +12 V ── eigenes Netzteil
+```
+
+Die meisten Leser ziehen D0/D1 auf **5 V** hoch – das verträgt der ESP32 nicht. Dann
+einen **Pegelwandler** (z. B. BSS138-Modul) oder je Leitung einen Spannungsteiler
+(z. B. 10 kΩ / 20 kΩ) dazwischen. Leser mit Open-Collector-Ausgang können direkt an
+die Pins (der ESP schaltet den internen Pull-up ein).
+
+Bedienung am Tastenfeld: Code eintippen, **#** bestätigt, ***** löscht. Gültig sind
+Öffnen-Code und Gästecodes. Karten werden unter **Einstellungen → Tastenfeld / RFID**
+angelernt: Karte an den Leser halten, die Nummer erscheint dort zum Übernehmen.
 
 ### Türöffner und Klingel
 
@@ -197,6 +257,9 @@ nichts, der Optokoppler zieht nur ~10 mA aus dem Klingeltrafo.
 
 Gegenprobe auf **V~** an diesen Adern: in Ruhe ~0 V, beim Klingeln 6–24 V~.
 
+**Alternative ganz ohne Verdrahtung:** Die Anlage ruft beim Klingeln den Türöffner an –
+siehe [Klingeln per Anruf](#klingeln-per-anruf-tk-anlage).
+
 #### D) Klingel mit Gleichspannung
 
 Wie **B**, aber auf die Polung achten: Plus über den Vorwiderstand an `IN+`, Minus an
@@ -259,11 +322,23 @@ Alle Pins stehen in [src/config.h](src/config.h) und lassen sich dort anpassen.
 ## Bauen & Flashen (PlatformIO)
 
 ```powershell
-pio run -e esp32dev  -t upload   # ESP32 DevKit
-pio run -e nodemcuv2 -t upload   # ESP8266 HW-364A
+pio run -e esp32dev         -t upload   # ESP32 DevKit
+pio run -e esp32dev_homekit -t upload   # ESP32 DevKit mit Apple Home
+pio run -e wt32-eth01       -t upload   # WT32-ETH01 (Ethernet)
+pio run -e nodemcuv2        -t upload   # ESP8266 HW-364A
 
-pio device monitor -b 115200     # serielle Ausgabe
+pio device monitor -b 115200            # serielle Ausgabe
 ```
+
+| Umgebung           | Board          | Besonderheit                                       |
+|--------------------|----------------|----------------------------------------------------|
+| `esp32dev`         | ESP32 DevKit   | alle Funktionen außer Apple Home                   |
+| `esp32dev_homekit` | ESP32 DevKit   | zusätzlich Apple Home (Programmspeicher ~97 % voll) |
+| `wt32-eth01`       | WT32-ETH01     | Ethernet statt WLAN                                |
+| `nodemcuv2`        | ESP8266        | ohne Telegram-Bot, Tastenfeld/RFID und Apple Home  |
+
+Apple Home ist eine eigene Variante, weil die Bibliothek HomeSpan rund 400 KB belegt
+und schon beim Start in die WLAN-Einstellungen eingreift.
 
 **ESP32-Flashen:** Manche ESP32-Boards wechseln nicht automatisch in den
 Download-Modus (`Wrong boot mode detected (0x13)` bzw. `No serial data received`).
@@ -283,6 +358,12 @@ schafft Platz für die größere Firmware (2× 1,9 MB für OTA) und enthält 128
 das LittleFS. **Wer von Version 1.2 kommt, muss einmal per USB flashen** – eine neue
 Flash-Aufteilung lässt sich nicht per OTA übertragen. Die Einstellungen bleiben dabei
 erhalten.
+
+### Update auf Version 1.5
+
+- Neue Einstellungen erscheinen mit ausgeschalteten Voreinstellungen – das Verhalten
+  bleibt, bis man etwas aktiviert.
+- Der lange Verlauf (CSV) beginnt mit dem Update; der bisherige kurze Verlauf bleibt.
 
 ### Update von Version 1.3
 
@@ -380,6 +461,8 @@ Wechselt ein Passwort, werden die Anmeldungen der betroffenen Rolle beendet.
 | POST    | `/api/login`   | `user`, `pw`, `keep` (1 = 30 Tage) | Anmelden (setzt Sitzungs-Cookie) |
 | POST    | `/logout`      | –                                  | Abmelden                  |
 | POST    | `/open`        | –                                  | Tür öffnen                |
+| POST    | `/open2`       | –                                  | zweites Relais schalten   |
+| GET     | `/log.csv`     | –                                  | langer Verlauf als CSV    |
 | POST    | `/call`        | –                                  | Test-Anruf                |
 | POST    | `/setduration` | `s`                                | Summer-Dauer (Sekunden)   |
 | POST    | `/setdial`     | `nr`, `pin`, `auto`, `s`           | Rufkette, Code, Dauer     |
@@ -387,8 +470,14 @@ Wechselt ein Passwort, werden die Anmeldungen der betroffenen Rolle beendet.
 | POST    | `/setsip`      | `server`, `port`, `user`, `pw`     | SIP-Zugang                |
 | POST    | `/setmqtt`     | `server`, `port`, `user`, `pw`     | MQTT-Broker               |
 | POST    | `/setsyslog`   | `server`                           | Syslog-Server             |
+| POST    | `/setring`     | `callers` (Liste, `*` = jeder)     | Klingeln per Anruf        |
+| POST    | `/setrelay2`   | `on`, `name`, `dur`, `user`        | zweites Relais            |
+| POST    | `/setusers`    | `users` (`Name:Passwort:Rolle:Tage:Von:Bis;…`, Felder %-kodiert, leeres Passwort = unverändert) | weitere Benutzer |
+| POST    | `/settelegram` | `open`, `chats`                    | Telegram-Bot              |
+| POST    | `/setkeypad`   | `on`, `cards` (`Nummer:Name;…`)    | Tastenfeld / RFID         |
+| POST    | `/sethomekit`  | `on`, `reset` (neuer Code)         | Apple Home (nach Neustart)|
 | POST    | `/setquiet`    | `on`, `from`, `to` (Minuten)       | Nachtruhe                 |
-| POST    | `/setpraxis`   | `on`, `days` (Bits Mo–So), `from`, `to`, `from2`, `to2`, `free` | Praxis-Modus |
+| POST    | `/setpraxis`   | `on`, `days` (Bits Mo–So), `from`, `to`, `from2`, `to2`, `free`, `holiday` (z. B. `NW`) | Praxis-Modus |
 | POST    | `/setdoor`     | `on`, `inv`, `alert` (Minuten)     | Türkontakt                |
 | POST    | `/setpush`     | `type`, `server`, `topic`, `token`, `ev` | Push-Mitteilungen   |
 | POST    | `/testpush`    | –                                  | Test-Mitteilung           |
@@ -403,7 +492,8 @@ Wechselt ein Passwort, werden die Anmeldungen der betroffenen Rolle beendet.
 | POST    | `/wifireset`   | –                                  | WLAN-Daten löschen        |
 | POST    | `/update`      | Datei (multipart)                  | Firmware-Update           |
 
-Der Tür-Zugang darf nur `/status`, `/log`, `/open` und `/call`. Ohne Anmeldung
+Der Tür-Zugang darf nur `/status`, `/log`, `/log.csv`, `/open`, `/call` und – falls
+freigegeben – `/open2`. Ohne Anmeldung
 antwortet das Gerät mit `401` (ohne Browser-Anmeldefenster).
 
 Werkzeuge können statt der Anmeldeseite **Basic-Auth** verwenden, z. B.:
@@ -448,6 +538,29 @@ Ton und wartet 30 s auf einen Code:
 Codes innerhalb von 15 min werden Anrufe 15 min lang abgelehnt (mit Push-Meldung).
 Ohne Öffnen-Code und ohne gültigen Gästecode werden keine Anrufe angenommen.
 
+## Klingeln per Anruf (TK-Anlage)
+
+Statt das Klingelsignal zu verdrahten, kann die Telefonanlage den Türöffner beim
+Klingeln **anrufen** – genau wie sie die Telefone anruft. Unter **Einstellungen →
+Klingeln per Anruf** die Nummer(n) eintragen, von denen solche Anrufe kommen (`*` =
+jeder Anrufer). Der Türöffner nimmt diese Anrufe nicht an (Antwort „486 Besetzt“, damit
+die Anlage die übrigen Telefone weiter klingeln lässt) und wertet sie als Klingeln:
+Verlauf, Push, Home Assistant, Praxis-Modus – alles wie beim Klingelkontakt.
+
+Einrichten, z. B. OpenCom: in der Anlage beim Türklingel-Sensor die Nebenstelle des
+Türöffners als (zusätzliches) Ziel eintragen, einmal klingeln, dann in der
+Weboberfläche bei „Letzter Anrufer“ auf **Übernehmen** klicken. Damit der Türöffner
+nicht zusätzlich selbst anruft, „Beim Klingeln anrufen“ ausschalten, wenn die Anlage
+die Telefone schon klingeln lässt.
+
+## Weitere Benutzer
+
+Unter **System → Weitere Benutzer** bis zu 8 Personen mit eigenem Namen und Passwort
+anlegen – Rolle **Tür** (öffnen, Verlauf) oder **Admin**. Optional mit Zeitfenster
+(Wochentage, Uhrzeit), z. B. „Reinigung: Mo–Fr 6–9 Uhr“. Außerhalb des Fensters ist
+keine Anmeldung möglich und bestehende Anmeldungen ruhen. Im Verlauf steht, wer
+geöffnet hat (z. B. „Geöffnet (Web) – Anna“).
+
 ## Push-Mitteilungen
 
 Unter **Dienste → Push-Mitteilungen**:
@@ -456,6 +569,25 @@ Unter **Dienste → Push-Mitteilungen**:
   `tuer-k7x2p9`) und dasselbe Topic eintragen. Eigener ntfy-Server und Zugangs-Token
   sind möglich.
 - **Telegram**: Bot über `@BotFather` anlegen, Bot-Token und Chat-ID eintragen.
+
+Zusätzlich wählbar: **„Melden, wenn nach dem Summer niemand hereinkam“** (braucht den
+Türkontakt).
+
+### Telegram-Bot (ESP32)
+
+Ist Telegram eingestellt, beantwortet der Türöffner auch Nachrichten:
+
+| Befehl       | Funktion                                              |
+|--------------|-------------------------------------------------------|
+| `/status`    | Zustand (SIP, Zähler, Tür, Modus, letztes Ereignis)   |
+| `/oeffnen`   | Rückfrage mit Knopf **„Jetzt öffnen“**                |
+
+Mit **„Öffnen per Telegram erlauben“** bekommen Klingel-Mitteilungen einen Knopf
+**„🔓 Öffnen“**. Ein Knopf gilt 3 Minuten – alte Mitteilungen öffnen später nicht mehr.
+Nur die eingetragene Chat-ID und die **weiteren erlaubten Chat-IDs** dürfen den Bot
+benutzen; ein fremder Chat bekommt seine Chat-ID angezeigt (zum Freischalten). Der Bot
+fragt per Long-Polling bei Telegram nach – keine Portfreigabe nötig. Auf dem ESP8266
+nicht verfügbar (zu wenig Speicher für die dauernde TLS-Verbindung).
 
 Wählbar sind Meldungen bei Klingeln, Öffnen und „Tür zu lange offen“; die Sperre nach
 falschen Codes wird immer gemeldet. Auf dem ESP32 laufen sie in einem eigenen Task und
@@ -469,6 +601,19 @@ Unter **Dienste → Syslog** einen Server eintragen (UDP 514, z. B. rsyslog, Syn
 Log Center oder das Home-Assistant-Add-on). Der ESP schickt dann alle Meldungen
 (Start, WLAN, SIP-Anmeldung, MQTT, Ereignisse) dorthin – ideal zur Fehlersuche bei
 einer Kundeninstallation. Codes und Passwörter werden nicht übertragen.
+
+## Apple Home (HomeKit)
+
+Variante `esp32dev_homekit` flashen, dann unter **Dienste → Apple Home** einschalten
+und neu starten. In der Home-App: **Gerät hinzufügen → Weitere Optionen →
+Türöffner** und den angezeigten Kopplungscode eingeben.
+
+- **Türschloss**: „Aufschließen“ löst den Summer aus; das Schloss zeigt „offen“,
+  solange der Summer läuft.
+- **Türklingel**: Klingeln erzeugt eine Mitteilung auf iPhone, Watch und HomePod.
+
+HomeSpan nutzt das WLAN des Türöffners und den Port 1201; `tueroeffner.local` und die
+Weboberfläche bleiben unverändert. Ein- und Ausschalten wirkt nach einem Neustart.
 
 ## Home Assistant
 
@@ -496,6 +641,7 @@ Voraussetzung: das Add-on **Mosquitto broker** und die **MQTT-Integration**.
 | Summer-Dauer                  | Zahl        | 1–30 s (Konfiguration)                           |
 | SIP registriert               | Binärsensor | Verbindung zur Telefonanlage (Diagnose)          |
 | Klingeln / Öffnungen / Anrufe | Sensor      | Zähler, bleiben über Neustarts erhalten          |
+| *Name* öffnen                 | Button      | zweites Relais (nur wenn aktiviert)              |
 
 Jedes Ereignis wird zusätzlich auf `tueroeffner/<id>/event` veröffentlicht (JSON mit
 `type`, `event`, `detail`) – praktisch für eigene Automationen.
@@ -557,7 +703,12 @@ Grundeinstellungen in [src/config.h](src/config.h), u. a.:
 | `INCOMING_CALL_SECONDS`  | 30              | Dauer eines Anrufs an den Türöffner                |
 | `INCOMING_LOCK_FAILS`    | 6               | falsche Codes bis zur Sperre (`INCOMING_LOCK_MIN`) |
 | `AUTH_MAX_FAILS`         | 5               | falsche Anmeldungen bis zur Sperre                 |
-| `LOG_SIZE`               | 30              | Einträge im Verlauf                                |
+| `LOG_SIZE`               | 30              | Einträge im (kurzen) Verlauf                       |
+| `EVENT_FILE_MAX`         | 48000           | Größe einer Datei des langen Verlaufs (Bytes, 2 Dateien) |
+| `DOOR_PASS_WINDOW_SEC`   | 10              | so lange nach dem Summer muss die Tür aufgehen     |
+| `USERS_MAX`              | 8               | weitere Benutzer                                   |
+| `KEYPAD_LOCK_FAILS`      | 5               | Fehlversuche am Tastenfeld bis zur Sperre (`KEYPAD_LOCK_MIN`) |
+| `TELEGRAM_BUTTON_SEC`    | 180             | Gültigkeit des Telegram-Knopfs „Öffnen“            |
 
 **Fehlersuche SIP:** In [platformio.ini](platformio.ini) `build_flags = -DDEBUGLOG`
 einkommentieren – dann werden alle SIP-Pakete seriell ausgegeben.
@@ -571,7 +722,11 @@ einkommentieren – dann werden alle SIP-Pakete seriell ausgegeben.
 | [src/events.cpp](src/events.cpp) | Ereignisprotokoll, serielle Ausgabe, Syslog |
 | [src/door.cpp](src/door.cpp) | Relais/Summer, Eingänge, Zeitfenster, Display, Status-LED |
 | [src/phone.cpp](src/phone.cpp) | SIP-Anmeldung, Rufkette, Codes, Anrufe an den Türöffner |
-| [src/push.cpp](src/push.cpp) | ntfy / Telegram |
+| [src/push.cpp](src/push.cpp) | ntfy / Telegram, Telegram-Bot |
+| [src/keypad.cpp](src/keypad.cpp) | Tastenfeld / RFID (Wiegand) |
+| [src/homekit.cpp](src/homekit.cpp) | Apple Home (HomeSpan) |
+| [src/net.cpp](src/net.cpp) | Netzwerk-Abstraktion WLAN / Ethernet |
+| [src/holidays.h](src/holidays.h) | gesetzliche Feiertage je Bundesland |
 | [src/mqtt.cpp](src/mqtt.cpp) | Home Assistant |
 | [src/web.cpp](src/web.cpp) | HTTP-API, Anmeldung, Schutzmechanismen |
 | [src/web/index.html](src/web/index.html) | Weboberfläche |
@@ -581,6 +736,22 @@ einkommentieren – dann werden alle SIP-Pakete seriell ausgegeben.
 Neue Einstellung: Variable in `settings.cpp` anlegen, eine Zeile in der Tabelle
 `SETTINGS` ergänzen – Speichern, Sicherung und Wiederherstellung funktionieren damit
 automatisch.
+
+## Tests und CI
+
+- **Host-Tests** ([tests/host](tests/host)): SIP-Bibliothek (Digest nach RFC 2617,
+  REGISTER, ausgehende/eingehende Anrufe, Klingel-Anrufe, DTMF, 20 000 Zufallspakete)
+  und Feiertagsberechnung – übersetzt mit AddressSanitizer/UBSan:
+
+  ```bash
+  bash tests/host/run.sh      # Linux oder WSL, braucht g++
+  ```
+
+- Beim Bauen prüft [tools/embed_html.py](tools/embed_html.py) das JavaScript der
+  Weboberfläche mit Node (falls installiert) und bricht bei Syntaxfehlern ab.
+- **GitHub Actions** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) baut bei
+  jedem Push alle Varianten, führt die Host-Tests aus und stellt die `firmware.bin`
+  als Artefakt bereit.
 
 ## Lizenz
 

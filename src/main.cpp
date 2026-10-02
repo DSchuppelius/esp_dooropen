@@ -1,4 +1,4 @@
-// SIP-Tueroeffner fuer ESP32 / ESP8266 - Start, Loop, WLAN und Selbstheilung.
+// SIP-Tueroeffner fuer ESP32 / ESP8266 - Start, Loop, WLAN/Ethernet und Selbstheilung.
 // Uebersicht der Module: siehe app.h
 #include "app.h"
 #if defined(ESP32)
@@ -13,6 +13,9 @@
 #endif
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
+#if defined(USE_ETHERNET)
+  #include <ETH.h>
+#endif
 #include <time.h>
 
 String bootReason;
@@ -169,11 +172,12 @@ static void configModeCallback(WiFiManager *) {
 
 // Einmalig, sobald das WLAN steht (und das Einrichtungsportal zu ist)
 static void startServices() {
-  myIpStr = WiFi.localIP().toString();
-  logMsg("WLAN verbunden, IP %s", myIpStr.c_str());
+  myIpStr = netIP().toString();
+  logMsg("%s verbunden, IP %s", netIsEthernet() ? "Ethernet" : "WLAN", myIpStr.c_str());
 
   // Modem-Sleep aus: sonst verschluckt der ESP Unicast-Pakete (Ping/HTTP)
-#if defined(ESP32)
+#if defined(USE_ETHERNET)
+#elif defined(ESP32)
   WiFi.setSleep(false);
 #else
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
@@ -217,6 +221,7 @@ static void startServices() {
   mqttBegin();
   webBegin();
   initSip();
+  homekitBegin();   // Apple Home (falls eingeschaltet)
   servicesUp = true;
   logMsg("Tueroeffner " FW_VERSION " bereit (%s)", bootReason.c_str());
 }
@@ -229,8 +234,13 @@ static void wifiSavedCallback() {
 
 // Verbindung ueberwachen: Dienste starten, bei neuer IP SIP neu anmelden
 static void netLoop() {
+#if defined(USE_ETHERNET)
+  portalActive = false;
+  bool connected = netUp();
+#else
   portalActive = wm.getConfigPortalActive();
-  bool connected = WiFi.status() == WL_CONNECTED;
+  bool connected = netUp();
+#endif
 
   // Verbunden, aber Portal noch offen (z.B. erster Versuch nach dem Speichern
   // scheiterte, die automatische Wiederverbindung klappte dann doch) -> schliessen
@@ -252,7 +262,7 @@ static void netLoop() {
     startServices();
     return;
   }
-  String ip = WiFi.localIP().toString();
+  String ip = netIP().toString();
   if (ip != myIpStr) {
     logMsg("Neue IP-Adresse %s (vorher %s) -> SIP neu anmelden", ip.c_str(), myIpStr.c_str());
     myIpStr = ip;
@@ -264,10 +274,10 @@ static void netLoop() {
 
 // Selbstheilung: WLAN zu lange weg oder Speicher knapp -> Neustart
 static void selfHeal() {
-  if (WiFi.status() != WL_CONNECTED && !portalActive) {
+  if (!netUp() && !portalActive) {
     if (!wifiLostAt) wifiLostAt = millis();
     else if (millis() - wifiLostAt > (uint32_t)WIFI_LOST_RESTART_MIN * 60000UL) {
-      logMsg("Selbstheilung: WLAN zu lange weg -> Neustart");
+      logMsg("Selbstheilung: Netzwerk zu lange weg -> Neustart");
       restartNow(RR_WIFI_LOST);
     }
   } else {
@@ -299,8 +309,18 @@ void setup() {
   displayBegin();
   checkEmergencyReset();
   pushBegin();
+  keypadBegin();
   logEvent(EV_BOOT, bootReason);
 
+#if defined(USE_ETHERNET)
+  // Ethernet (WT32-ETH01): kein WLAN, keine Einrichtung per Portal
+  WiFi.mode(WIFI_OFF);
+  ETH.setHostname(HOSTNAME);
+  ETH.begin(ETH_PHY_LAN8720, ETH_PHY_ADDR_CFG, ETH_PHY_MDC_PIN, ETH_PHY_MDIO_PIN,
+            ETH_PHY_POWER_PIN, ETH_CLK_MODE_CFG);
+  if (staticIp) ETH.config(ipAddr, ipGw, ipMask, ipDns);
+  logMsg("Ethernet gestartet - warte auf Verbindung");
+#else
   // WLAN: bekanntes Netz versuchen; sonst Einrichtungsportal, das NICHT blockiert -
   // Klingel, Taster und Summer funktionieren waehrenddessen weiter.
   WiFi.mode(WIFI_STA);
@@ -318,6 +338,7 @@ void setup() {
   if (staticIp) wm.setSTAStaticIPConfig(ipAddr, ipGw, ipMask, ipDns);
   if (!wm.autoConnect(WIFI_AP_NAME, apPw.length() ? apPw.c_str() : nullptr))
     logMsg("WLAN nicht verbunden - Einrichtung laeuft im Hintergrund");
+#endif
 
 #if defined(ESP32)
   // Watchdog fuer die Loop: haengt sie laenger als LOOP_WATCHDOG_SEC -> Neustart
@@ -332,7 +353,9 @@ void setup() {
 
 void loop() {
   feedWatchdog();
+#if !defined(USE_ETHERNET)
   wm.process();
+#endif
   netLoop();
   if (servicesUp) {
     server.handleClient();
@@ -343,6 +366,8 @@ void loop() {
   }
   phoneLoop();
   doorLoop();
+  keypadLoop();
+  homekitLoop();
   mqttLoop();
   pushLoop();
   settingsLoop();
@@ -350,7 +375,9 @@ void loop() {
 
   // Geplanter Neustart (nach Update, Neustart-Button, WLAN-Reset, Sicherung, Netzwerk)
   if (restartAt && (int32_t)(millis() - restartAt) >= 0) {
+#if !defined(USE_ETHERNET)
     if (wifiResetDue) wm.resetSettings();
+#endif
     restartNow(restartReason);
   }
 }

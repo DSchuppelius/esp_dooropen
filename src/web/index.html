@@ -117,6 +117,15 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
 .chip{border:0;border-radius:99px;padding:6px 11px;background:var(--tile);color:var(--mut);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
 .chip.on{background:var(--acc);color:#fff}
+.row{background:var(--tile);border-radius:12px;padding:10px;margin-top:8px}
+.row input,.row select{background:var(--card)}
+.row .gl{display:flex;align-items:center;justify-content:space-between;margin-top:8px;font-size:13px;color:var(--mut);gap:8px}
+.row .days{margin-top:8px}
+.row .days span{background:var(--card)}
+.x{background:none;border:0;color:var(--bad);font:inherit;font-weight:600;cursor:pointer;padding:4px}
+.link{background:none;border:0;color:var(--acc);font:inherit;font-weight:600;cursor:pointer;padding:0}
+.btn.hold{position:relative;overflow:hidden}
+.btn.hold i{position:absolute;left:0;top:0;bottom:0;width:0;background:color-mix(in srgb,var(--ok) 35%,transparent)}
 .hide{display:none!important}
 </style></head><body>
 <div class="app">
@@ -175,15 +184,20 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
     <button class="btn" onclick="testCall()">📞 Test-Anruf</button>
     <button class="btn" id="snd" onclick="initAudio();beep()">🔇 Ton testen</button>
    </div>
+   <button class="btn full hold hide" id="r2btn" onpointerdown="r2Start(event)" onpointerup="r2End()" onpointerleave="r2End()"
+    onpointercancel="r2End()" oncontextmenu="return false" onclick="if(event.detail===0)open2()"><i id="r2bar"></i>
+    <span id="r2lbl">🔓 Tor öffnen</span></button>
   </div>
   <div class="card">
    <h2>Verlauf <b id="logcnt" class="off"></b></h2>
    <div class="chips" id="logf">
     <button class="chip on" data-f="">Alle</button><button class="chip" data-f="ring">Klingeln</button>
     <button class="chip" data-f="open">Öffnungen</button><button class="chip" data-f="call">Anrufe</button>
+    <button class="chip" data-f="door">Tür</button><button class="chip" data-f="fail">Fehlversuche</button>
    </div>
    <ul class="log" id="log"><li><span>Noch keine Ereignisse</span></li></ul>
    <button class="btn full hide" id="logmore" onclick="toggleLog()"></button>
+   <button class="btn full" onclick="download('/log.csv','tueroeffner-verlauf.csv')">⬇ Ganzer Verlauf als CSV</button>
   </div>
  </div>
 
@@ -200,6 +214,14 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    <p class="note">Mehrere Nummern werden nacheinander angerufen, bis jemand abhebt (je 15 s).
    Mit Code bleibt das Gespräch 30 s offen; „*“ oder „#“ löscht die Eingabe.</p>
    <button class="btn pri" onclick="saveGeneral()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Klingeln per Anruf</h2>
+   <label for="ringcall">Anrufe dieser Nummern gelten als Klingeln</label>
+   <input id="ringcall" type="text" inputmode="tel" placeholder="z. B. 31 – leer = aus, * = jeder">
+   <p class="note">Für TK-Anlagen (z. B. OpenCom): Die Anlage ruft beim Klingeln den Türöffner an. Er nimmt
+   nicht ab und wertet den Anruf als Klingeln – ganz ohne Verdrahtung. <span id="ringnote"></span></p>
+   <button class="btn pri" onclick="saveRing()">Speichern</button>
   </div>
   <div class="card">
    <h2>Anrufe an den Türöffner <b id="inst" class="off">–</b></h2>
@@ -235,6 +257,9 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    </div>
    <label for="pfree">Ausnahmetage (Feiertage, Urlaub)</label>
    <input id="pfree" type="text" placeholder="z. B. 24.12, 31.12, 3.10.2026">
+   <label for="phol">Gesetzliche Feiertage (Praxis-Modus ruht)</label>
+   <select id="phol"><option value="">keine</option><option value="BW">Baden-Württemberg</option><option value="BY">Bayern</option><option value="BE">Berlin</option><option value="BB">Brandenburg</option><option value="HB">Bremen</option><option value="HH">Hamburg</option><option value="HE">Hessen</option><option value="MV">Mecklenburg-Vorpommern</option><option value="NI">Niedersachsen</option><option value="NW">Nordrhein-Westfalen</option><option value="RP">Rheinland-Pfalz</option><option value="SL">Saarland</option><option value="SN">Sachsen</option><option value="ST">Sachsen-Anhalt</option><option value="SH">Schleswig-Holstein</option><option value="TH">Thüringen</option></select>
+   <p class="note" id="pholnote"></p>
    <p class="note">In diesen Zeitfenstern öffnet Klingeln sofort die Tür, ohne Anruf. Zweites Fenster
    z. B. für den Nachmittag; gleiche Zeiten = aus. Ausnahmetage ohne Jahr gelten jedes Jahr.</p>
    <button class="btn pri" onclick="savePraxis()">Speichern</button>
@@ -246,7 +271,32 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    <label for="dalert">Melden, wenn länger offen als (Minuten, 0 = nie)</label>
    <input id="dalert" type="number" min="0" max="1440">
    <p class="note" id="dnote">Reed-Kontakt zwischen Pin und GND, geschlossen = Tür zu.</p>
+   <p class="note">Mit Türkontakt prüft das Gerät nach dem Summer, ob die Tür wirklich aufging
+   (Verlauf: „Tür nach Summer geöffnet“ bzw. „Summer, Tür blieb zu“).</p>
    <button class="btn pri" onclick="saveDoor()">Speichern</button>
+  </div>
+  <div class="card">
+   <h2>Zweites Relais</h2>
+   <div class="sw" style="margin-top:0"><span>Zweites Relais verwenden</span><input id="r2on" type="checkbox"></div>
+   <div class="two">
+    <div><label for="r2name">Name</label><input id="r2name" type="text" maxlength="16" placeholder="z. B. Tor"></div>
+    <div><label for="r2dur">Dauer (s)</label><input id="r2dur" type="number" min="1" max="30"></div>
+   </div>
+   <div class="sw"><span>Auch mit Tür-Zugang schaltbar</span><input id="r2user" type="checkbox"></div>
+   <p class="note">Z. B. für Tor, Garage oder eine zweite Tür. Erscheint als eigener Knopf im Tab „Tür“ und in
+   Home Assistant.</p>
+   <button class="btn pri" onclick="saveRelay2()">Speichern</button>
+  </div>
+  <div class="card hide" id="wgcard">
+   <h2>Tastenfeld / RFID-Leser</h2>
+   <div class="sw" style="margin-top:0"><span>Leser angeschlossen (Wiegand)</span><input id="wgon" type="checkbox"></div>
+   <p class="note">Am Tastenfeld Öffnen-Code oder Gästecode eintippen und mit <b>#</b> bestätigen (<b>*</b> löscht).
+   Nach 5 Fehlversuchen ist der Leser 5 min gesperrt.</p>
+   <h3>Karten und Chips</h3>
+   <div id="clist" class="list"></div>
+   <button class="btn full" id="cadd" onclick="addCard('','')">+ Karte</button>
+   <p class="note" id="wgnote"></p>
+   <button class="btn pri" onclick="saveKeypad()">Speichern</button>
   </div>
   <div class="card">
    <h2>SIP-Zugang <b id="sipst" class="off">–</b></h2>
@@ -274,6 +324,15 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
     <div class="sw"><span>Klingeln melden</span><input id="pev1" type="checkbox"></div>
     <div class="sw"><span>Öffnen melden</span><input id="pev2" type="checkbox"></div>
     <div class="sw"><span>Tür zu lange offen melden</span><input id="pev4" type="checkbox"></div>
+    <div class="sw"><span>Melden, wenn nach dem Summer niemand hereinkam</span><input id="pev8" type="checkbox"></div>
+    <div id="tgbox" class="hide">
+     <h3>Telegram-Bot</h3>
+     <div class="sw"><span>Öffnen per Telegram erlauben</span><input id="tgopen" type="checkbox"></div>
+     <label for="tgchats">Weitere erlaubte Chat-IDs</label>
+     <input id="tgchats" type="text" placeholder="z. B. 123456, -987654">
+     <p class="note">Befehle <b>/status</b> und <b>/oeffnen</b>. Klingel-Mitteilungen bekommen einen Knopf
+     „Öffnen“ (3 min gültig). Nur die Chat-ID oben und die hier eingetragenen dürfen den Bot benutzen.</p>
+    </div>
    </div>
    <p class="note" id="pnote"></p>
    <button class="btn pri" onclick="savePush()">Speichern</button>
@@ -295,6 +354,14 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    <p class="note">Das Gerät erscheint automatisch unter <b>Einstellungen → Geräte &amp; Dienste → MQTT</b>.
    Voraussetzung: Mosquitto-Add-on und MQTT-Integration.</p>
   </div>
+  <div class="card hide" id="hkcard">
+   <h2>Apple Home <b id="hkst" class="off">–</b></h2>
+   <div class="sw" style="margin-top:0"><span>Apple Home (HomeKit) aktiv</span><input id="hkon" type="checkbox"></div>
+   <p class="note" id="hknote">Erscheint als Türschloss mit Türklingel. In der Home-App „Gerät hinzufügen“ →
+   „Weitere Optionen“ und den Kopplungscode eingeben. Ein-/Ausschalten wirkt nach einem Neustart.</p>
+   <button class="btn pri" onclick="saveHomekit()">Speichern</button>
+   <button class="btn full" onclick="hkReset()">Neuen Kopplungscode erzeugen</button>
+  </div>
   <div class="card">
    <h2>Syslog</h2>
    <label for="syslog">Server (IP oder Name, UDP 514)</label>
@@ -313,13 +380,13 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    <div class="kv"><span>Laufzeit</span><b id="sysup">–</b></div>
    <div class="kv"><span>Letzter Start</span><b id="sysboot">–</b></div>
    <div class="kv"><span>Uhrzeit</span><b id="systime">–</b></div>
-   <div class="kv"><span>WLAN-Signal</span><b id="sysrssi">–</b></div>
+   <div class="kv"><span id="sysnetl">WLAN-Signal</span><b id="sysrssi">–</b></div>
    <div class="kv"><span>Freier Speicher</span><b id="sysheap">–</b></div>
    <div class="row2">
     <button class="btn" onclick="restart()">↻ Neustart</button>
     <button class="btn" onclick="resetCounters()">Zähler auf 0</button>
    </div>
-   <button class="btn bad full" onclick="wifiReset()">WLAN zurücksetzen</button>
+   <button class="btn bad full" id="wifireset" onclick="wifiReset()">WLAN zurücksetzen</button>
   </div>
   <div class="card">
    <h2>Netzwerk</h2>
@@ -336,7 +403,7 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    5 s halten – dann gilt wieder DHCP.</p>
    <button class="btn pri" onclick="saveNet()">Speichern &amp; neu starten</button>
   </div>
-  <div class="card">
+  <div class="card" id="apcard">
    <h2>WLAN-Einrichtung <b id="apst" class="off">–</b></h2>
    <label for="appw">Passwort für „<span id="apname">Tueroeffner-Setup</span>“</label>
    <input id="appw" type="password" maxlength="32" placeholder="unverändert" autocomplete="new-password">
@@ -369,8 +436,17 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
    Passwort vergessen? Klingel-Taster beim Einschalten 5 s halten – dann sind beide Passwörter weg.</p>
   </div>
   <div class="card">
+   <h2>Weitere Benutzer</h2>
+   <div id="ulist" class="list"></div>
+   <button class="btn full" id="uadd" onclick="addUser()">+ Benutzer</button>
+   <p class="note">Eigene Anmeldung je Person – der Verlauf zeigt, wer geöffnet hat. Rolle „Tür“ darf nur
+   öffnen. Mit Zeitfenster nur an den gewählten Tagen und Uhrzeiten (gleiche Zeiten = ganztags).
+   Leeres Passwort bei bestehenden Benutzern = unverändert.</p>
+   <button class="btn pri" onclick="saveUsers()">Speichern</button>
+  </div>
+  <div class="card">
    <h2>Sicherung</h2>
-   <button class="btn full" style="margin-top:0" onclick="backup()">⬇ Einstellungen herunterladen</button>
+   <button class="btn full" style="margin-top:0" onclick="download('/backup','tueroeffner.json')">⬇ Einstellungen herunterladen</button>
    <label for="rs">Sicherung einspielen</label>
    <input id="rs" type="file" accept=".json">
    <button class="btn pri" onclick="restore()">Einspielen &amp; neu starten</button>
@@ -403,7 +479,7 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
 </div>
 <div class="toast" id="toast"></div>
 <script>
-let audioCtx=null,soundOn=false,wasRinging=false,buzEnd=0,buzDur=1,tt,logN=-1,role=2,cur=0,cfgAt=0,gDirty=false,cfg={};
+let audioCtx=null,soundOn=false,wasRinging=false,buzEnd=0,buzDur=1,tt,logN=-1,role=2,cur=0,cfgAt=0,gDirty=false,uDirty=false,cDirty=false,cfg={},stat={};
 const $=id=>document.getElementById(id);
 // Alle Anfragen der Seite kennzeichnen: das Geraet akzeptiert dafuer nur die
 // Sitzung, keine vom Browser gemerkte Basic-Anmeldung (sonst klappt Abmelden nicht)
@@ -462,6 +538,8 @@ const isField=c=>c.id&&(c.tagName==='INPUT'||c.tagName==='SELECT')&&c.type!=='fi
 function due(c){const b=c.closest('.card').querySelector('.pri');if(b)b.classList.add('due');}
 function markDirty(e){const c=e.target;
  if(c.closest&&c.closest('#glist')){gDirty=true;due(c);return;}
+ if(c.closest&&c.closest('#ulist')){uDirty=true;due(c);return;}
+ if(c.closest&&c.closest('#clist')){cDirty=true;due(c);return;}
  if(!isField(c))return;dirty.add(c.id);c.classList.add('dirty');due(c);}
 document.addEventListener('input',markDirty);document.addEventListener('change',markDirty);
 // Enter in einem Feld = Speichern-Button der Karte
@@ -491,7 +569,10 @@ function dur(s){if(s<60)return s+' s';if(s<3600)return(s/60|0)+' min';
 const EV=['🔔 Klingeln','🔔 Klingeln (Nachtruhe)','📞 Anruf ausgelöst','🔓 Geöffnet (Web)',
  '🔓 Geöffnet (Taster)','🔓 Geöffnet (Telefon)','🔓 Geöffnet (Home Assistant)','⚡ Gerät gestartet',
  '🔓 Automatisch geöffnet (Praxis)','📵 Niemand hat abgehoben','⚠️ Tür zu lange offen',
- '📲 Anruf an den Türöffner','🔓 Geöffnet (Gästecode)','⛔ Falscher Code'];
+ '📲 Anruf an den Türöffner','🔓 Geöffnet (Gästecode)','⛔ Falscher Code',
+ '🚶 Tür nach Summer geöffnet','🚪 Summer, Tür blieb zu','🚪 Tür geöffnet (ohne Summer)','🔓 Zweites Relais',
+ '🔓 Geöffnet (Telegram)','🔓 Geöffnet (Tastenfeld)','🔓 Geöffnet (Karte)','⛔ Falscher Code am Tastenfeld',
+ '⛔ Unbekannte Karte','🔓 Geöffnet (Apple Home)'];
 function when(e){
  if(!e.t)return'vor '+dur(e.a);
  const d=new Date(e.t*1000);
@@ -510,7 +591,7 @@ function logView(){
 }
 function toggleLog(){logOpen=!logOpen;try{localStorage.setItem('logOpen',logOpen?'1':'0');}catch(e){}logView();}
 // Filter: welche Ereignistypen zu welcher Gruppe gehoeren
-const LOGF={ring:[0,1],open:[3,4,5,6,8,12],call:[2,9,11,13]};
+const LOGF={ring:[0,1],open:[3,4,5,6,8,12,17,18,19,20,23],call:[2,9,11],door:[10,14,15,16],fail:[13,21,22]};
 let logF='',logEv=[];
 function renderLog(){
  const ul=$('log');ul.textContent='';
@@ -591,7 +672,10 @@ async function refresh(){
   $('reg').title=sipText(s)[0];
   $('rings').textContent=s.signals;$('cnt').textContent=s.triggers;$('calls').textContent=s.calls;
   if(!s.door)txt('doorst','–','off');else if(s.door==2)txt('doorst',s.dooralert?'offen!':'offen',s.dooralert?'bad':'warn');else txt('doorst','zu','on');
-  txt('mode',s.praxisnow?'Praxis':s.quietnow?'Nachtruhe':'Normal',s.praxisnow||s.quietnow?'warn':'');
+  stat=s;
+  txt('mode',s.praxisnow?'Praxis':s.quietnow?'Nachtruhe':s.holiday?'Feiertag':'Normal',s.praxisnow||s.quietnow?'warn':'');
+  $('r2btn').classList.toggle('hide',!s.r2);
+  if(!r2T)$('r2lbl').textContent=(s.r2act?'✔ ':'🔓 ')+s.r2name+(s.r2act?' offen':' öffnen');
   const lc=callText(s);txt('lastc',lc[0],lc[1]);if(s.lastnr)$('lastc').title='an '+s.lastnr;
   $('doorc').className=s.ringing?'card ringing':'card';
   if(s.ringing&&!wasRinging){if(soundOn)beep();try{navigator.vibrate&&navigator.vibrate([300,150,300,150,300]);}catch(e){}}
@@ -609,6 +693,15 @@ async function refresh(){
   if(role<2)return;   // Tuer-Zugang / ohne Anmeldung: keine Einstellungen
   setVal('dur',s.seconds);setVal('dial',s.dial);setChk('auto',s.callonring);
   setChk('qon',s.quiet);setChk('pon',s.praxis);setChk('inon',s.incoming);
+  $('ringnote').innerHTML='';
+  if(s.lastcaller){const b=document.createElement('button');b.className='link';b.textContent='Übernehmen';
+   b.onclick=()=>{$('ringcall').value=s.lastcaller;$('ringcall').dispatchEvent(new Event('input',{bubbles:true}));};
+   $('ringnote').append('Letzter Anrufer: '+s.lastcaller+' – ',b);}
+  $('pholnote').textContent=s.holiday?'Heute: '+s.holiday+' – der Praxis-Modus ruht.':'';
+  $('wgnote').innerHTML='';
+  if(s.wglast){const b=document.createElement('button');b.className='link';b.textContent='als neue Karte übernehmen';
+   b.onclick=()=>{addCard(s.wglast,'');cDirty=true;due($('clist'));};$('wgnote').append('Zuletzt gelesen: '+s.wglast+' – ',b);}
+  else $('wgnote').textContent='Karte an den Leser halten – die Nummer erscheint hier zum Übernehmen.';
   $('qnote').textContent=!s.ntp?'Uhrzeit noch nicht abgeglichen – greift erst danach.'
    :(s.quietnow?'Gerade aktiv. ':'')+'Klingeln wird weiter gezählt, protokolliert und gemeldet.';
   if(!s.incoming)txt('inst','aus','off');else if(s.inlock)txt('inst','gesperrt ('+Math.ceil(s.inlock/60)+' min)','bad');
@@ -623,10 +716,10 @@ async function refresh(){
   if(s.mqttcfg)flag('mqst',s.mqtt,'verbunden','getrennt');else txt('mqst','aus','off');
   $('sysup').textContent=dur(s.up);
   $('systime').textContent=s.ntp?new Date(s.now*1000).toLocaleString('de-DE'):'nicht abgeglichen';
-  $('sysrssi').textContent=s.rssi+' dBm ('+(s.rssi>-60?'gut':s.rssi>-75?'mittel':'schwach')+')';
+  $('sysrssi').textContent=cfg.eth?'verbunden':s.rssi+' dBm ('+(s.rssi>-60?'gut':s.rssi>-75?'mittel':'schwach')+')';
   $('sysheap').textContent=Math.round(s.heap/1024)+' KB (größter Block '+Math.round(s.maxblk/1024)+' KB)';
   if(cur&&Date.now()-cfgAt>30000)loadCfg();
- }catch(e){$('conn').className='dot off';$('connt').textContent='offline';
+ }catch(e){console.error(e);$('conn').className='dot off';$('connt').textContent='offline';
   if(++fails>=3)$('offline').classList.remove('hide');}
 }
 // Einstellungen (nur Admin; beim Start, nach dem Speichern und alle 30 s im offenen Tab)
@@ -640,13 +733,22 @@ async function loadCfg(){
   setVal('pfrom',hm(c.pfrom));setVal('pto',hm(c.pto));setVal('pfrom2',hm(c.pfrom2));setVal('pto2',hm(c.pto2));setVal('pfree',c.pfree);
   for(let i=0;i<7;i++)setChk('pd'+i,!!(c.pdays&(1<<i)));
   if(!gDirty)renderGuests(c.guests);
+  setVal('ringcall',c.ringcall);setVal('phol',c.pholiday);
+  setChk('r2on',c.r2on);setVal('r2name',c.r2name);setVal('r2dur',c.r2dur);setChk('r2user',c.r2user);
+  $('wgcard').classList.toggle('hide',!c.wgavail);setChk('wgon',c.wgon);if(!cDirty)renderCards(c.cards);
+  $('hkcard').classList.toggle('hide',!c.hkavail);setChk('hkon',c.hkon);
+  txt('hkst',c.hkon?c.hkstatus:'aus',c.hkstatus=='gekoppelt'?'on':c.hkon?'warn':'off');
+  setChk('tgopen',c.tgopen);setVal('tgchats',c.tgchats);
+  if(!uDirty)renderUsers(c.users);
+  $('apcard').classList.toggle('hide',!!c.eth);$('wifireset').classList.toggle('hide',!!c.eth);
+  $('sysnetl').textContent=c.eth?'Ethernet':'WLAN-Signal';
   setChk('don',c.dooron);setChk('dinv',c.doorinv);setVal('dalert',c.dooralertmin);
   $('dnote').textContent='Reed-Kontakt zwischen '+c.doorpin+' und GND, geschlossen = Tür zu.';
   setVal('sipserver',c.sipserver);setVal('sipport',c.sipport);setVal('sipuser',c.sipuser);
   $('sippw').placeholder=c.haspw?'unverändert':'nicht gesetzt';
   setVal('ptype',c.ptype);setVal('pserver',c.pserver);setVal('ptopic',c.ptopic);
   $('ptoken').placeholder=c.haspt?'unverändert':'nicht gesetzt';
-  for(const b of[1,2,4])setChk('pev'+b,!!(c.pev&b));pushForm();
+  for(const b of[1,2,4,8])setChk('pev'+b,!!(c.pev&b));pushForm();
   setVal('mqserver',c.mqttserver);setVal('mqport',c.mqttport);setVal('mquser',c.mqttuser);
   $('mqpw').placeholder=c.hasmqttpw?'unverändert':'nicht gesetzt';
   $('mqid').textContent=c.mqttid;$('mqbase').textContent=c.mqttbase;
@@ -694,6 +796,7 @@ function collectGuests(){
  return out.join(';');
 }
 function pushForm(){const t=$('ptype').value;$('pbox').classList.toggle('hide',t=='0');
+ $('tgbox').classList.toggle('hide',!(t=='2'&&cfg.tgavail));
  $('pserverbox').classList.toggle('hide',t!='1');
  $('ptopicl').textContent=t=='2'?'Chat-ID':'Topic';
  $('ptokenl').textContent=t=='2'?'Bot-Token':'Zugangs-Token (optional)';
@@ -721,19 +824,112 @@ function saveSyslog(){post('/setsyslog','Gespeichert',['syslog'],{server:$('sysl
 function saveQuiet(){
  post('/setquiet','Gespeichert',['qon','qfrom','qto'],{on:$('qon').checked?1:0,from:mins($('qfrom').value),to:mins($('qto').value)});
 }
+// Datei vom Geraet laden (mit Kennzeichnung) und speichern
+async function download(url,fallback){
+ try{
+  const r=await fetch(url);
+  if(r.status==401){showLogin(true,'Bitte anmelden.');return;}
+  if(!r.ok){toast('Fehler '+r.status,true);return;}
+  const cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename="([^"]+)"/);
+  const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());
+  a.download=m?m[1]:fallback;document.body.append(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+ }catch(e){toast('Keine Verbindung',true);}
+}
+function saveRing(){post('/setring','Gespeichert',['ringcall'],{callers:$('ringcall').value.trim()});}
+function saveRelay2(){
+ post('/setrelay2','Gespeichert',['r2on','r2name','r2dur','r2user'],
+  {on:$('r2on').checked?1:0,name:$('r2name').value.trim()||'Tor',dur:$('r2dur').value||3,user:$('r2user').checked?1:0});
+}
+function saveHomekit(){
+ post('/sethomekit','',['hkon'],{on:$('hkon').checked?1:0}).then(ok=>{if(ok)toast('Gespeichert – wirkt nach einem Neustart');});
+}
+function hkReset(){if(confirm('Neuen Kopplungscode erzeugen?\nBereits gekoppelte Geräte bleiben gekoppelt. Wirkt nach einem Neustart.'))
+ post('/sethomekit','Neuer Code nach Neustart',null,{on:$('hkon').checked?1:0,reset:1});}
+// Zweites Relais: ebenfalls gedrueckt halten
+let r2T=null;
+function open2(){post('/open2',(stat.r2name||'Tor')+' wird geöffnet');}
+function r2Start(e){if(e.button>0)return;e.preventDefault();const b=$('r2bar');
+ b.style.transition='width .8s linear';b.style.width='100%';$('r2lbl').textContent='weiter halten …';
+ r2T=setTimeout(()=>{r2T=null;b.style.transition='';b.style.width='0';open2();},800);}
+function r2End(){if(!r2T)return;clearTimeout(r2T);r2T=null;const b=$('r2bar');b.style.transition='width .2s';b.style.width='0';
+ $('r2lbl').textContent='🔓 '+(stat.r2name||'Tor')+' öffnen';}
+// Listen: %-Kodierung fuer : ; %
+const enc=v=>v.replace(/[%:;]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase().padStart(2,'0'));
+const dec=v=>v.replace(/%([0-9A-Fa-f]{2})/g,(m,h)=>String.fromCharCode(parseInt(h,16)));
+// Karten
+function addCard(nr,name){
+ const d=document.createElement('div');d.className='row';
+ d.innerHTML='<div class="two"><input type="text" class="cn" maxlength="24" placeholder="Name (z. B. Anna)">'
+  +'<input type="text" class="cc" inputmode="numeric" maxlength="10" placeholder="Kartennummer"></div>'
+  +'<div class="gl"><span></span><button class="x" type="button">Entfernen</button></div>';
+ d.querySelector('.cn').value=name;d.querySelector('.cc').value=nr;
+ d.querySelector('.x').onclick=()=>{d.remove();cDirty=true;due($('clist'));};
+ $('clist').append(d);
+}
+function renderCards(str){$('clist').textContent='';
+ for(const e of(str||'').split(';').filter(x=>x)){const i=e.indexOf(':');addCard(e.slice(0,i),e.slice(i+1));}}
+function saveKeypad(){
+ const out=[];
+ for(const d of $('clist').children){
+  const nr=d.querySelector('.cc').value.trim(),n=d.querySelector('.cn').value.trim().replace(/[:;]/g,' ');
+  if(!nr&&!n)continue;
+  if(!/^\d{1,10}$/.test(nr)){toast('Kartennummer „'+(n||nr)+'“: nur Ziffern',true);return;}
+  out.push(nr+':'+n);
+ }
+ post('/setkeypad','Gespeichert',['wgon'],{on:$('wgon').checked?1:0,cards:out.join(';')})
+  .then(ok=>{if(ok){cDirty=false;$('cadd').closest('.card').querySelector('.pri').classList.remove('due');}});
+}
+// Weitere Benutzer
+function addUser(u){
+ u=u||{name:'',role:1,days:0,from:0,to:0,isNew:true};
+ const d=document.createElement('div');d.className='row';d.dataset.isNew=u.isNew?'1':'';
+ let days='';['Mo','Di','Mi','Do','Fr','Sa','So'].forEach((t,i)=>days+='<label><input type="checkbox" class="ud" data-i="'+i+'"><span>'+t+'</span></label>');
+ d.innerHTML='<div class="two"><input type="text" class="un" maxlength="24" placeholder="Name" autocomplete="off">'
+  +'<select class="ur"><option value="1">Tür</option><option value="2">Admin</option></select></div>'
+  +'<input type="password" class="up" maxlength="32" autocomplete="new-password" style="margin-top:8px">'
+  +'<div class="days">'+days+'</div>'
+  +'<div class="half" style="margin-top:8px"><input type="time" class="uf" title="von"><input type="time" class="ut" title="bis"></div>'
+  +'<div class="gl"><span>Tage leer = jeden Tag</span><button class="x" type="button">Entfernen</button></div>';
+ d.querySelector('.un').value=u.name;d.querySelector('.ur').value=u.role;
+ d.querySelector('.up').placeholder=u.isNew?'Passwort':'Passwort (unverändert)';
+ for(const c of d.querySelectorAll('.ud'))c.checked=!!(u.days&(1<<c.dataset.i));
+ d.querySelector('.uf').value=hm(u.from);d.querySelector('.ut').value=hm(u.to);
+ d.querySelector('.x').onclick=()=>{d.remove();uDirty=true;due($('ulist'));};
+ $('ulist').append(d);$('uadd').classList.toggle('hide',$('ulist').children.length>=8);
+ if(u.isNew){uDirty=true;due($('ulist'));d.querySelector('.un').focus();}
+}
+function renderUsers(str){$('ulist').textContent='';
+ for(const e of(str||'').split(';').filter(x=>x)){const f=e.split(':');
+  addUser({name:dec(f[0]),role:+f[1],days:+f[2],from:+f[3],to:+f[4],isNew:false});}
+ $('uadd').classList.toggle('hide',$('ulist').children.length>=8);}
+function saveUsers(){
+ const out=[];
+ for(const d of $('ulist').children){
+  const n=d.querySelector('.un').value.trim(),pw=d.querySelector('.up').value;
+  if(!n){toast('Name fehlt',true);return;}
+  if(d.dataset.isNew&&!pw){toast('Passwort für „'+n+'“ fehlt',true);return;}
+  let days=0;for(const c of d.querySelectorAll('.ud'))if(c.checked)days|=1<<c.dataset.i;
+  out.push(enc(n)+':'+enc(pw)+':'+d.querySelector('.ur').value+':'+days+':'+mins(d.querySelector('.uf').value)+':'+mins(d.querySelector('.ut').value));
+ }
+ post('/setusers','Gespeichert',null,{users:out.join(';')})
+  .then(ok=>{if(ok){uDirty=false;for(const p of $('ulist').querySelectorAll('.up'))p.value='';
+   $('uadd').closest('.card').querySelector('.pri').classList.remove('due');}});
+}
 function savePraxis(){
  let d=0;for(let i=0;i<7;i++)if($('pd'+i).checked)d|=1<<i;
- post('/setpraxis','Gespeichert',['pon','pfrom','pto','pfrom2','pto2','pfree','pd0','pd1','pd2','pd3','pd4','pd5','pd6'],
+ post('/setpraxis','Gespeichert',['pon','pfrom','pto','pfrom2','pto2','pfree','phol','pd0','pd1','pd2','pd3','pd4','pd5','pd6'],
   {on:$('pon').checked?1:0,days:d,from:mins($('pfrom').value),to:mins($('pto').value),
-   from2:mins($('pfrom2').value),to2:mins($('pto2').value),free:$('pfree').value});
+   from2:mins($('pfrom2').value),to2:mins($('pto2').value),free:$('pfree').value,holiday:$('phol').value});
 }
 function saveDoor(){
  post('/setdoor','Gespeichert',['don','dinv','dalert'],{on:$('don').checked?1:0,inv:$('dinv').checked?1:0,alert:$('dalert').value||0});
 }
 function savePush(){
- let ev=0;for(const b of[1,2,4])if($('pev'+b).checked)ev|=b;
+ if(cfg.tgavail)post('/settelegram','',['tgopen','tgchats'],{open:$('tgopen').checked?1:0,chats:$('tgchats').value});
+ let ev=0;for(const b of[1,2,4,8])if($('pev'+b).checked)ev|=b;
  const p={type:$('ptype').value,server:$('pserver').value,topic:$('ptopic').value,token:$('ptoken').value,ev};
- $('ptoken').value='';post('/setpush','Gespeichert',['ptype','pserver','ptopic','ptoken','pev1','pev2','pev4'],p);
+ $('ptoken').value='';post('/setpush','Gespeichert',['ptype','pserver','ptopic','ptoken','pev1','pev2','pev4','pev8'],p);
 }
 function testPush(){post('/testpush','Test-Mitteilung wird gesendet');setTimeout(refresh,4000);}
 function saveNet(){
@@ -769,18 +965,6 @@ function resetCounters(){if(confirm('Zähler für Klingeln, Öffnungen und Anruf
 function wifiReset(){
  if(confirm('WLAN-Zugangsdaten löschen?\nDanach öffnet das Gerät das WLAN „'+(cfg.apname||'Tueroeffner-Setup')+'“ zur Neueinrichtung.'))
   post('/wifireset','WLAN wird zurückgesetzt');
-}
-// Sicherung per fetch laden (mit Kennzeichnung) und als Datei speichern
-async function backup(){
- try{
-  const r=await fetch('/backup');
-  if(r.status==401){showLogin(true,'Bitte als Admin anmelden.');return;}
-  if(!r.ok){toast('Fehler '+r.status,true);return;}
-  const cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename="([^"]+)"/);
-  const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());
-  a.download=m?m[1]:'tueroeffner.json';document.body.append(a);a.click();
-  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
- }catch(e){toast('Keine Verbindung',true);}
 }
 async function restore(){
  const f=$('rs').files[0];if(!f){toast('Bitte Sicherungsdatei auswählen',true);return;}

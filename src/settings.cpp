@@ -53,6 +53,19 @@ bool     incomingOn    = false;
 String   guestCodes    = "";
 String   syslogServer  = "";
 String   apPw          = WIFI_AP_PASSWORD;
+String   ringCallers   = "";
+String   praxisHoliday = "";
+bool     relay2On      = false;
+String   relay2Name    = "Tor";
+uint8_t  relay2Seconds = DEFAULT_BUZZER_SECONDS;
+bool     relay2User    = false;
+String   users         = "";
+bool     tgOpen        = false;
+String   tgChats       = "";
+bool     wgOn          = false;
+String   wgCards       = "";
+bool     hkOn          = false;
+String   hkCode        = "";
 
 uint32_t signalCount = 0, buzzerTriggers = 0, callCount = 0;
 
@@ -177,6 +190,126 @@ bool apPwValid(const String &p) {
   return p.length() == 0 || (p.length() >= 8 && p.length() <= 32);
 }
 
+// Bundesland fuer Feiertage: leer oder ein Kuerzel
+static bool holidayStateValid(const String &s) {
+  static const char *const STATES[] = { "BW", "BY", "BE", "BB", "HB", "HH", "HE", "MV",
+                                        "NI", "NW", "RP", "SL", "SN", "ST", "SH", "TH" };
+  if (s.length() == 0) return true;
+  for (const char *st : STATES) if (s == st) return true;
+  return false;
+}
+
+// Klingel-Rufnummern: Liste wie die Rufkette oder "*"
+static bool ringCallersValid(const String &s) {
+  return s == "*" || dialListValid(s);
+}
+
+// Feld fuer Listen (Benutzer): % : ; als %XX
+String urlEncodeField(const String &v) {
+  static const char hex[] = "0123456789ABCDEF";
+  String r;
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (c == '%' || c == ':' || c == ';' || (uint8_t)c < 0x20) { r += '%'; r += hex[(uint8_t)c >> 4]; r += hex[c & 15]; }
+    else r += c;
+  }
+  return r;
+}
+
+String urlDecode(const String &v) {
+  String r;
+  r.reserve(v.length());
+  for (size_t i = 0; i < v.length(); i++) {
+    if (v[i] == '%' && i + 2 < v.length() && isxdigit((uint8_t)v[i + 1]) && isxdigit((uint8_t)v[i + 2])) {
+      r += (char)strtol(v.substring(i + 1, i + 3).c_str(), nullptr, 16);
+      i += 2;
+    } else {
+      r += v[i];
+    }
+  }
+  return r;
+}
+
+// Weitere Benutzer: "Name:Passwort:Rolle:Tage:Von:Bis;..." (Felder %-kodiert).
+// Rolle 1 = Tuer, 2 = Admin; Tage Bit 0 = Montag (0 = alle); Von == Bis = immer.
+static bool parseUser(const String &e, UserEntry &u) {
+  String f[6];
+  int start = 0;
+  for (int i = 0; i < 6; i++) {
+    int end = i < 5 ? e.indexOf(':', start) : e.length();
+    if (end < 0) return false;
+    f[i] = e.substring(start, end);
+    start = end + 1;
+  }
+  u.name = urlDecode(f[0]);
+  u.pw   = urlDecode(f[1]);
+  long role = f[2].toInt(), days = f[3].toInt(), from = f[4].toInt(), to = f[5].toInt();
+  if (u.name.length() < 1 || u.name.length() > 24 || u.pw.length() < 1 || u.pw.length() > 32) return false;
+  if ((role != 1 && role != 2) || days < 0 || days > 127 || from < 0 || from > 1439 || to < 0 || to > 1439) return false;
+  u.role = (uint8_t)role;
+  u.days = (uint8_t)days;
+  u.from = (uint16_t)from;
+  u.to   = (uint16_t)to;
+  return true;
+}
+
+bool userAt(uint8_t idx, UserEntry &u) {
+  int start = 0;
+  uint8_t i = 0;
+  while (start < (int)users.length()) {
+    int end = users.indexOf(';', start);
+    if (end < 0) end = users.length();
+    if (i == idx) return parseUser(users.substring(start, end), u);
+    i++;
+    start = end + 1;
+  }
+  return false;
+}
+
+bool usersValid(const String &s) {
+  if (s.length() > 900) return false;
+  int start = 0, n = 0;
+  String names = ";";
+  while (start < (int)s.length()) {
+    int end = s.indexOf(';', start);
+    if (end < 0) end = s.length();
+    UserEntry u;
+    if (!parseUser(s.substring(start, end), u) || ++n > USERS_MAX) return false;
+    String key = ";" + u.name + ";";
+    if (names.indexOf(key) >= 0) return false;   // Namen eindeutig
+    names += u.name + ";";
+    start = end + 1;
+  }
+  return true;
+}
+
+// Karten fuer den RFID-Leser: "Nummer:Name;..."
+bool cardsValid(const String &s) {
+  if (s.length() > 700) return false;
+  int start = 0, n = 0;
+  while (start < (int)s.length()) {
+    int end = s.indexOf(';', start);
+    if (end < 0) end = s.length();
+    String e = s.substring(start, end);
+    int c = e.indexOf(':');
+    if (c < 1 || c > 10 || ++n > 25) return false;
+    for (int i = 0; i < c; i++) if (!isdigit((uint8_t)e[i])) return false;
+    if (e.length() - c - 1 > 24 || e.indexOf(':', c + 1) >= 0) return false;
+    start = end + 1;
+  }
+  return true;
+}
+
+// HomeKit-Kopplungscode: 8 Ziffern, keine trivialen Folgen (verbietet Apple)
+static bool hkCodeValid(const String &c) {
+  if (c.length() == 0) return true;
+  if (c.length() != 8 || !pinValid(c)) return false;
+  static const char *const BAD[] = { "00000000", "11111111", "22222222", "33333333", "44444444", "55555555",
+                                     "66666666", "77777777", "88888888", "99999999", "12345678", "87654321" };
+  for (const char *b : BAD) if (c == b) return false;
+  return true;
+}
+
 // Eingegebenen Text sicher in einen JSON-String packen
 String jsonEsc(const String &s) {
   String r;
@@ -201,7 +334,7 @@ struct SettingDef {
   bool      (*valid)(const String &);     // zusaetzliche Pruefung oder nullptr
 };
 
-static const SettingDef SETTINGS[] = {
+static const SettingDef SETTINGS[] PROGMEM = {   // im Flash (RAM sparen, ESP8266)
   {"dur",        ST_U8,   &buzzerSeconds, MIN_BUZZER_SECONDS, MAX_BUZZER_SECONDS, nullptr},
   {"dial",       ST_STR,  &dialList,      0, MAX_DIAL_LIST, dialListValid},
   {"pin",        ST_STR,  &dtmfPin,       0, 8,     pinValid},
@@ -232,7 +365,7 @@ static const SettingDef SETTINGS[] = {
   {"doorinv",    ST_BOOL, &doorInvert,    0, 1,     nullptr},
   {"dooralert",  ST_U16,  &doorAlertMin,  0, 1440,  nullptr},
   {"pushtype",   ST_U8,   &pushType,      PUSH_OFF, PUSH_TELEGRAM, nullptr},
-  {"pushev",     ST_U8,   &pushEvents,    0, 7,     nullptr},
+  {"pushev",     ST_U8,   &pushEvents,    0, 15,    nullptr},
   {"pushserver", ST_STR,  &pushServer,    0, 64,    nullptr},
   {"pushtopic",  ST_STR,  &pushTopic,     0, 64,    nullptr},
   {"pushtoken",  ST_STR,  &pushToken,     0, 64,    nullptr},
@@ -245,6 +378,30 @@ static const SettingDef SETTINGS[] = {
   {"guests",     ST_STR,  &guestCodes,    0, 300,   guestsValid},
   {"syslog",     ST_STR,  &syslogServer,  0, 40,    nullptr},
   {"appw",       ST_STR,  &apPw,          0, 32,    apPwValid},
+  {"ringcall",   ST_STR,  &ringCallers,   0, 64,    ringCallersValid},
+  {"pholiday",   ST_STR,  &praxisHoliday, 0, 2,     holidayStateValid},
+  {"r2on",       ST_BOOL, &relay2On,      0, 1,     nullptr},
+  {"r2name",     ST_STR,  &relay2Name,    1, 16,    nullptr},
+  {"r2dur",      ST_U8,   &relay2Seconds, MIN_BUZZER_SECONDS, MAX_BUZZER_SECONDS, nullptr},
+  {"r2user",     ST_BOOL, &relay2User,    0, 1,     nullptr},
+  {"users",      ST_STR,  &users,         0, 900,   usersValid},
+  {"tgopen",     ST_BOOL, &tgOpen,        0, 1,     nullptr},
+  {"tgchats",    ST_STR,  &tgChats,       0, 100,   nullptr},
+  {"wgon",       ST_BOOL, &wgOn,          0, 1,     nullptr},
+  {"cards",      ST_STR,  &wgCards,       0, 700,   cardsValid},
+  {"hkon",       ST_BOOL, &hkOn,          0, 1,     nullptr},
+  {"hkcode",     ST_STR,  &hkCode,        0, 8,     hkCodeValid},
+};
+
+// Tabelle aus dem Flash lesen: for (SettingIter it; it.next(d);) ...
+static const size_t SETTINGS_N = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
+struct SettingIter {
+  size_t i = 0;
+  bool next(SettingDef &d) {
+    if (i >= SETTINGS_N) return false;
+    memcpy_P(&d, &SETTINGS[i++], sizeof(d));
+    return true;
+  }
 };
 
 // Wert pruefen und (wenn apply) uebernehmen
@@ -365,7 +522,9 @@ static const char *existingFile(const char *path, const char *tmp) {
 
 void saveSettings() {
   bool ok = writeKvFile(SETTINGS_FILE, SETTINGS_TMP, [](File &f) {
-    for (const SettingDef &d : SETTINGS) writeKv(f, d.key, settingValue(d));
+    SettingIter it;
+    SettingDef  d;
+    while (it.next(d)) writeKv(f, d.key, settingValue(d));
   });
   if (!ok) logMsg("Einstellungen: Speichern fehlgeschlagen");
 }
@@ -400,6 +559,7 @@ void stateChanged() {
 // blockiert kurz und wuerde den Piepton stoeren)
 void settingsLoop() {
   if (stateDirty && !aSip.IsBusy() && millis() - lastStateSave > COUNTER_SAVE_MS) saveState();
+  eventsFlush();   // langer Verlauf (nicht waehrend eines Anrufs)
 }
 
 static void loadState() {
@@ -560,7 +720,9 @@ void settingsBegin() {
   const char *path = existingFile(SETTINGS_FILE, SETTINGS_TMP);
   if (path) {
     readKvFile(path, [](const String &k, const String &v) {
-      for (const SettingDef &d : SETTINGS)
+      SettingIter it;
+      SettingDef  d;
+      while (it.next(d))
         if (k == d.key) { applySetting(d, v, true); break; }
     });
     sanitize();
@@ -580,7 +742,9 @@ String settingsJson() {
   String j;
   j.reserve(1400);
   j = "{\"tueroeffner\":1,\"fw\":\"" FW_VERSION "\"";
-  for (const SettingDef &d : SETTINGS) {
+  SettingIter it;
+  SettingDef  d;
+  while (it.next(d)) {
     j += ",\"";
     j += d.key;
     j += "\":";
@@ -595,7 +759,9 @@ String settingsJson() {
 // Sicherung einspielen: gueltige Felder uebernehmen, ungueltige in err auflisten
 bool restoreFromArgs(WEB_SERVER_CLASS &srv, String &err) {
   int n = 0;
-  for (const SettingDef &d : SETTINGS) {
+  SettingIter it;
+  SettingDef  d;
+  while (it.next(d)) {
     if (!srv.hasArg(d.key)) continue;
     if (applySetting(d, srv.arg(d.key), true)) n++;
     else { if (err.length()) err += ", "; err += d.key; }

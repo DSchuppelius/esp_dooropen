@@ -3,7 +3,35 @@
 // ============================================================
 //  Pin-Belegung
 // ============================================================
-#if defined(ESP32)
+#if defined(ETH_BOARD_WT32)
+// ---- WT32-ETH01 (ESP32 mit Ethernet, LAN8720) -----------------
+// Verfuegbare Pins am Stecker: IO2 IO4 IO12 IO14 IO15 IO17 IO32 IO33 IO35 IO36 IO39.
+// IO35/36/39 sind reine Eingaenge OHNE internen Pull-up.
+#define USE_ETHERNET
+#define ETH_PHY_ADDR_CFG   1
+#define ETH_PHY_POWER_PIN  16
+#define ETH_PHY_MDC_PIN    23
+#define ETH_PHY_MDIO_PIN   18
+#define ETH_CLK_MODE_CFG   ETH_CLOCK_GPIO0_IN
+
+#define PIN_SDA        15   // I2C (nur falls ein OLED angeschlossen wird)
+#define PIN_SCL        14
+#define PIN_RELAY      4    // Relais Tuersummer (active-high)
+#define RELAY_ACTIVE_LOW  false
+#define PIN_SIGNAL     32   // Klingel-Kontakt gegen GND
+#define SIGNAL_ACTIVE_LOW true
+#define PIN_BTN_RING   33   // Klingel-Taster gegen GND
+#define PIN_BTN_BUZZER 12   // Summer-Taster gegen GND (Strapping-Pin: nie extern auf 3,3 V ziehen)
+#define PIN_DOOR       2    // Tuerkontakt gegen GND
+#define PIN_STATUS_LED    17
+#define STATUS_LED_ACTIVE_LOW false
+// Zweites Relais und Tastenfeld/RFID (Wiegand) auf den reinen Eingaengen bzw. frei:
+#define PIN_RELAY2     5    // RXD-Pin des Moduls (UART2), frei nutzbar
+#define RELAY2_ACTIVE_LOW false
+#define PIN_WG_D0      35   // Wiegand D0 (Pull-up/Pegelwandler noetig, siehe README)
+#define PIN_WG_D1      36   // Wiegand D1
+
+#elif defined(ESP32)
 // ---- ESP32 DevKit (WROOM-32) --------------------------------
 // Kein Onboard-OLED: I2C liegt auf den Standard-Pins (falls extern genutzt).
 #define PIN_SDA        21   // GPIO21 (I2C SDA)
@@ -31,6 +59,15 @@
 // mit 330 Ohm von GPIO2 nach GND anschliessen.
 #define PIN_STATUS_LED    2       // GPIO2 (Onboard-LED, active-high)
 #define STATUS_LED_ACTIVE_LOW false
+
+// Zweites Relais (z.B. Garage, zweite Tuer), im Web aktivieren
+#define PIN_RELAY2     13   // GPIO13
+#define RELAY2_ACTIVE_LOW false
+
+// Tastenfeld / RFID-Leser mit Wiegand-Schnittstelle (D0/D1), im Web aktivieren.
+// Leser mit 5-V-Ausgaengen brauchen einen Pegelwandler (siehe README).
+#define PIN_WG_D0      18   // GPIO18
+#define PIN_WG_D1      19   // GPIO19
 
 #else
 // ---- ESP8266 HW-364A (NodeMCU mit fest verbautem OLED) -------
@@ -62,6 +99,11 @@
 // Onboard-LED (blaue LED, GPIO2): Summer an = Dauerlicht, Blinkmuster fuer WLAN/SIP.
 #define PIN_STATUS_LED    LED_BUILTIN
 #define STATUS_LED_ACTIVE_LOW true
+
+// Zweites Relais auf D0 (GPIO16). Tastenfeld/RFID (Wiegand) gibt es auf dem
+// ESP8266 nicht - es sind keine Pins mehr frei.
+#define PIN_RELAY2     D0   // GPIO16
+#define RELAY2_ACTIVE_LOW false
 #endif
 
 // ============================================================
@@ -160,6 +202,23 @@
 #define INCOMING_LOCK_FAILS     6      // falsche Codes insgesamt ...
 #define INCOMING_LOCK_MIN       15     // ... innerhalb/fuer so viele Minuten -> Sperre
 #define GUEST_CODES_MAX         5      // Anzahl Gaestecodes
+
+// ============================================================
+//  Erweiterungen
+// ============================================================
+// Tuerkontakt: so lange nach dem Summer-Ende muss die Tuer aufgehen, sonst
+// "Tuer blieb zu" (s)
+#define DOOR_PASS_WINDOW_SEC    10
+// Langer Verlauf im LittleFS (CSV-Export): je Datei hoechstens so viele Bytes,
+// danach wird sie zur ".old"-Datei (also insgesamt etwa das Doppelte)
+#define EVENT_FILE_MAX          48000
+// Weitere Benutzer (zusaetzlich zu Admin und Tuer-Zugang)
+#define USERS_MAX               8
+// Tastenfeld: falsche Codes bis zur Sperre und deren Dauer
+#define KEYPAD_LOCK_FAILS       5
+#define KEYPAD_LOCK_MIN         5
+// Telegram: so lange ist der "Oeffnen"-Knopf einer Klingel-Mitteilung gueltig (s)
+#define TELEGRAM_BUTTON_SEC     180
 
 // ============================================================
 //  VoIP / SIP (ansitel = Asterisk)

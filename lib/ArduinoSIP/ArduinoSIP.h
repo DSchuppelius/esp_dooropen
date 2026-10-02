@@ -91,6 +91,17 @@ class Sip
     bool        NewIncoming() { bool b = bNewIncoming; bNewIncoming = false; return b; }
     const char *IncomingFrom() { return caInCaller; }
 
+    // Klingeln per Anruf (Erweiterung): liefert der Filter fuer die Nummer des
+    // Anrufers true, wird der Anruf mit "486 Busy Here" abgewiesen und als Klingeln
+    // gemeldet (RingCall() einmal true). So kann z.B. eine TK-Anlage beim Klingeln
+    // den Tueroeffner wie ein Telefon anrufen.
+    typedef bool (*RingFilter)(const char *caller);
+    void        SetRingFilter(RingFilter f) { pRingFilter = f; }
+    bool        RingCall() { bool b = bRingCall; bRingCall = false; return b; }
+    const char *RingCaller() { return caRingCaller; }
+    // Nummer des letzten Anrufers (egal ob angenommen) - zum Einrichten
+    const char *LastCaller() { return caLastCaller; }
+
   private:
     char       *pbuf;
     size_t      lbuf;
@@ -149,6 +160,11 @@ class Sip
     char        caInVia[400];       // alle Via-Zeilen der letzten Anfrage (mit CRLF)
     char        caInContact[120];   // Ziel fuer unser BYE
     char        caInCaller[32];     // Rufnummer fuer das Protokoll
+    RingFilter  pRingFilter = nullptr;
+    bool        bRingCall = false;
+    char        caRingCaller[32];
+    char        caLastCaller[32];
+    char        caRingCallId[100];  // gegen doppelte Meldung bei INVITE-Wiederholungen
     int         iInCSeq = 0;
     int         iInByeCSeq = 1;
     uint32_t    inTag = 0;

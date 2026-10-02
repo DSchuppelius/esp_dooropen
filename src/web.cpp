@@ -94,6 +94,7 @@ static uint32_t clientIp() {
 struct WebSession {
   char     token[33];   // 128 Bit zufaellig, hex
   uint8_t  role;
+  char     name[25];    // angemeldeter Benutzer (fuer Verlauf und Pruefung)
   bool     keep;        // angemeldet bleiben
   uint32_t created;     // Unix-Zeit (0 = unbekannt)
   uint32_t lastUsed;    // millis()
@@ -103,7 +104,8 @@ static const char    *SESSION_FILE    = "/sessions.txt";
 static const uint32_t SESSION_IDLE_MS = 12UL * 3600UL * 1000UL;
 static const uint32_t SESSION_KEEP_S  = 30UL * 86400UL;
 
-static bool loggedIn = false;   // letzte Anfrage mit gueltiger Anmeldung?
+static bool   loggedIn = false;   // letzte Anfrage mit gueltiger Anmeldung?
+static String currentUser;        // Name des Benutzers der laufenden Anfrage (oder leer)
 
 static uint32_t randomWord() {
 #if defined(ESP32)
@@ -123,7 +125,8 @@ static void sessionsSave() {
   File f = LittleFS.open(SESSION_FILE, "w");
   if (!f) return;
   for (const WebSession &s : sessions)
-    if (s.keep && sessionValid(s)) f.printf("%s %u %lu\n", s.token, s.role, (unsigned long)s.created);
+    if (s.keep && sessionValid(s))
+      f.printf("%s %u %lu %s\n", s.token, s.role, (unsigned long)s.created, urlEncodeField(s.name).c_str());
   f.close();
 }
 
@@ -136,8 +139,12 @@ static void sessionsLoad() {
     char tok[40];
     unsigned role;
     unsigned long created;
-    if (sscanf(line.c_str(), "%39s %u %lu", tok, &role, &created) != 3 || strlen(tok) != 32) continue;
+    int  rest = 0;
+    if (sscanf(line.c_str(), "%39s %u %lu %n", tok, &role, &created, &rest) != 3 || strlen(tok) != 32) continue;
     memcpy(s.token, tok, 33);
+    String nm = urlDecode(line.substring(rest));
+    nm.trim();
+    strlcpy(s.name, nm.c_str(), sizeof(s.name));
     s.role     = (uint8_t)role;
     s.keep     = true;
     s.created  = created;
@@ -171,7 +178,7 @@ static void setSessionCookie(const char *token, bool keep) {
   server.sendHeader("Set-Cookie", c);
 }
 
-static void sessionCreate(uint8_t role, bool keep) {
+static void sessionCreate(uint8_t role, bool keep, const String &name) {
   WebSession *slot = &sessions[0];
   for (WebSession &s : sessions) {
     if (!sessionValid(s)) { slot = &s; break; }
@@ -179,6 +186,7 @@ static void sessionCreate(uint8_t role, bool keep) {
   }
   for (int i = 0; i < 4; i++) snprintf(slot->token + i * 8, 9, "%08lx", (unsigned long)randomWord());
   slot->role     = role;
+  strlcpy(slot->name, name.c_str(), sizeof(slot->name));
   slot->keep     = keep;
   slot->created  = timeValid() ? (uint32_t)time(nullptr) : 0;
   slot->lastUsed = millis();
@@ -186,15 +194,40 @@ static void sessionCreate(uint8_t role, bool keep) {
   setSessionCookie(slot->token, keep);
 }
 
+// Gibt es das Konto noch mit dieser Rolle, und darf es sich jetzt anmelden?
+// (Passwortwechsel und geloeschte Benutzer beenden so auch bestehende Sitzungen,
+// Zeitfenster gelten auch waehrend einer Sitzung.)
+static bool accountActive(const String &name, uint8_t role) {
+  if (role == ROLE_ADMIN && name == webUser && webPw.length()) return true;
+  if (role == ROLE_USER && name == opUser && opPw.length()) return true;
+  UserEntry u;
+  for (uint8_t i = 0; userAt(i, u); i++)
+    if (u.name == name) return u.role == role && userWindowOk(u);
+  return false;
+}
+
+// Zugangsdaten pruefen (Anmeldeseite): Rolle oder ROLE_NONE; name = Kontoname
+static uint8_t checkLogin(const String &user, const String &pw, String &name) {
+  name = user;
+  if (webPw.length() && user == webUser && pw == webPw) return ROLE_ADMIN;
+  if (opPw.length() && user == opUser && pw == opPw)    return ROLE_USER;
+  UserEntry u;
+  for (uint8_t i = 0; userAt(i, u); i++)
+    if (u.name == user && u.pw == pw) return userWindowOk(u) ? u.role : ROLE_NONE;
+  return ROLE_NONE;
+}
+
 // Admin-Passwort schuetzt die Einstellungen, das Tuer-Passwort (Bedien-Zugang) die Tuer.
 // Ohne Tuer-Passwort darf jeder oeffnen und den Verlauf sehen.
 static uint8_t currentRole() {
+  currentUser = "";
   loggedIn = false;
   if (webPw.length() == 0) return ROLE_ADMIN;   // kein Schutz eingerichtet
   WebSession *s = sessionFind();
-  if (s) {
+  if (s && accountActive(s->name, s->role)) {
     s->lastUsed = millis();
-    loggedIn = true;
+    loggedIn    = true;
+    currentUser = s->name;
     return s->role;
   }
   // Basic-Auth nur fuer Werkzeuge (curl -u ...). Anfragen der eigenen Seite tragen
@@ -203,8 +236,17 @@ static uint8_t currentRole() {
   // (Sec-Fetch-Site senden Browser nur bei HTTPS, darum der eigene Header.)
   bool fromPage = server.hasHeader("X-Tueroeffner") || server.header("Sec-Fetch-Site").length();
   if (server.hasHeader("Authorization") && !fromPage) {
-    if (server.authenticate(webUser.c_str(), webPw.c_str())) { authOk(clientIp()); loggedIn = true; return ROLE_ADMIN; }
-    if (opPw.length() && server.authenticate(opUser.c_str(), opPw.c_str())) { authOk(clientIp()); loggedIn = true; return ROLE_USER; }
+    if (server.authenticate(webUser.c_str(), webPw.c_str())) {
+      authOk(clientIp()); loggedIn = true; currentUser = webUser; return ROLE_ADMIN;
+    }
+    if (opPw.length() && server.authenticate(opUser.c_str(), opPw.c_str())) {
+      authOk(clientIp()); loggedIn = true; currentUser = opUser; return ROLE_USER;
+    }
+    UserEntry u;
+    for (uint8_t i = 0; userAt(i, u); i++)
+      if (userWindowOk(u) && server.authenticate(u.name.c_str(), u.pw.c_str())) {
+        authOk(clientIp()); loggedIn = true; currentUser = u.name; return u.role;
+      }
     authFailed(clientIp(), server.header("Authorization"));
   }
   if (opPw.length() == 0) return ROLE_USER;     // Tuer ohne Anmeldung
@@ -319,10 +361,8 @@ void handleApiLogin() {
     return;
   }
   if (!sameOrigin()) { sendErr(403, F("Anfrage von fremder Seite abgelehnt")); return; }
-  String u = argTrim("user"), p = server.arg("pw");
-  uint8_t role = ROLE_NONE;
-  if (webPw.length() && u == webUser && p == webPw)             role = ROLE_ADMIN;
-  else if (opPw.length() && u == opUser && p == opPw)           role = ROLE_USER;
+  String u = argTrim("user"), p = server.arg("pw"), name;
+  uint8_t role = checkLogin(u, p, name);
   if (!role) {
     authFailed(clientIp(), u + ":" + p);
     uint32_t l = lockRemaining(clientIp());
@@ -331,8 +371,8 @@ void handleApiLogin() {
     return;
   }
   authOk(clientIp());
-  sessionCreate(role, server.arg("keep") == "1");
-  logMsg("Web: %s angemeldet (%s)", role == ROLE_ADMIN ? "Admin" : "Tuer-Zugang",
+  sessionCreate(role, server.arg("keep") == "1", name);
+  logMsg("Web: %s angemeldet als %s (%s)", name.c_str(), role == ROLE_ADMIN ? "Admin" : "Tuer-Zugang",
          IPAddress(clientIp()).toString().c_str());
   server.send(200, "application/json", "{\"ok\":true,\"role\":" + String(role) + "}");
 }
@@ -407,13 +447,22 @@ void handleStatus() {
   json += jBool(F("ntp"),       timeValid());
   json += jNum(F("now"),       (long)time(nullptr));
   json += jNum(F("logn"),      logTotal);
+  json += jStr(F("user"),      currentUser);
+  json += jBool(F("r2"),       relay2On && (relay2User || role == ROLE_ADMIN));
+  json += jStr(F("r2name"),    relay2Name);
+  json += jBool(F("r2act"),    relay2Active);
+  json += jBool(F("doorpass"), doorOn);
+  const char *hol = holidayToday();
+  json += jStr(F("holiday"),   hol ? hol : "");
   if (role == ROLE_ADMIN) {
+    json += jStr(F("lastcaller"), aSip.LastCaller());
+    json += jStr(F("wglast"),     keypadLastCard());
     json += jNum(F("ptype"),   pushType);
     json += jNum(F("pcode"),   lastPushCode);
     json += jBool(F("mqttcfg"), mqttServer.length() > 0);
     json += jBool(F("mqtt"),    mqttConnected());
     json += jNum(F("up"),      uptimeSeconds());
-    json += jNum(F("rssi"),    WiFi.RSSI());
+    json += jNum(F("rssi"),    netRssi());
     json += jNum(F("heap"),    ESP.getFreeHeap());
     json += jNum(F("maxblk"),  maxFreeBlock());
   }
@@ -461,15 +510,15 @@ void handleConfig() {
   json += jStr(F("mqttbase"),   baseTopic);
   json += jStr(F("syslog"),     syslogServer);
   json += jStr(F("host"),       HOSTNAME);
-  json += jStr(F("ip"),         WiFi.localIP().toString());
+  json += jStr(F("ip"),         netIP().toString());
   json += jStr(F("ver"),        FW_VERSION " (" __DATE__ ")");
   json += jStr(F("boot"),       bootReason);
   json += jBool(F("nstatic"),    staticIp);
   // Bei DHCP die aktuellen Werte vorschlagen
-  json += jStr(F("nip"),   (staticIp ? ipAddr : WiFi.localIP()).toString());
-  json += jStr(F("nmask"), (staticIp ? ipMask : WiFi.subnetMask()).toString());
-  json += jStr(F("ngw"),   (staticIp ? ipGw   : WiFi.gatewayIP()).toString());
-  json += jStr(F("ndns"),  (staticIp ? ipDns  : WiFi.dnsIP()).toString());
+  json += jStr(F("nip"),   (staticIp ? ipAddr : netIP()).toString());
+  json += jStr(F("nmask"), (staticIp ? ipMask : netMask()).toString());
+  json += jStr(F("ngw"),   (staticIp ? ipGw   : netGateway()).toString());
+  json += jStr(F("ndns"),  (staticIp ? ipDns  : netDns()).toString());
   json += jStr(F("apname"),     WIFI_AP_NAME);
   json += jBool(F("apset"),      apPw.length() > 0);
   json += jBool(F("apdefault"),  apPw == WIFI_AP_PASSWORD);
@@ -478,6 +527,37 @@ void handleConfig() {
   json += jBool(F("ota"),        otaActive());
   json += jStr(F("opuser"),     opUser);
   json += jBool(F("hasop"),      opPw.length() > 0);
+  json += jStr(F("ringcall"),    ringCallers);
+  json += jStr(F("pholiday"),    praxisHoliday);
+  json += jBool(F("r2on"),       relay2On);
+  json += jStr(F("r2name"),      relay2Name);
+  json += jNum(F("r2dur"),       relay2Seconds);
+  json += jBool(F("r2user"),     relay2User);
+  // Benutzer ohne Passwoerter: "Name:Rolle:Tage:Von:Bis;..."
+  {
+    String ul;
+    UserEntry u;
+    for (uint8_t i = 0; userAt(i, u); i++) {
+      if (i) ul += ';';
+      ul += urlEncodeField(u.name) + ':' + String(u.role) + ':' + String(u.days) + ':' +
+            String(u.from) + ':' + String(u.to);
+    }
+    json += jStr(F("users"), ul);
+  }
+#if defined(ESP32)
+  json += jBool(F("tgavail"),    true);
+#else
+  json += jBool(F("tgavail"),    false);
+#endif
+  json += jBool(F("tgopen"),     tgOpen);
+  json += jStr(F("tgchats"),     tgChats);
+  json += jBool(F("wgavail"),    keypadAvailable());
+  json += jBool(F("wgon"),       wgOn);
+  json += jStr(F("cards"),       wgCards);
+  json += jBool(F("hkavail"),    homekitAvailable());
+  json += jBool(F("hkon"),       hkOn);
+  json += jStr(F("hkstatus"),    homekitStatus());
+  json += jBool(F("eth"),        netIsEthernet());
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -508,9 +588,25 @@ void handleLog() {
 // ------------------------------------------------------------
 void handleOpen() {
   NEED_USER;
-  startBuzzer(EV_OPEN_WEB);
+  startBuzzer(EV_OPEN_WEB, currentUser);
   aSip.Hangup();   // Tuer ist auf -> laufenden Anruf beenden (klingelnd: CANCEL, sonst BYE)
   sendOk();
+}
+
+// Zweites Relais (Tor o.ae.): Tuer-Zugang nur, wenn freigegeben
+void handleOpen2() {
+  if (!gate(relay2User ? ROLE_USER : ROLE_ADMIN)) return;
+  if (!startRelay2("Web" + (currentUser.length() ? " " + currentUser : String()))) {
+    sendErr(400, F("Zweites Relais ist ausgeschaltet"));
+    return;
+  }
+  sendOk();
+}
+
+// Langer Verlauf als CSV-Datei
+void handleLogCsv() {
+  NEED_USER;
+  eventsCsv(server);
 }
 
 void handleCall() {
@@ -625,6 +721,8 @@ void handleSetQuiet() {
   sendOk();
 }
 
+static bool holidays_known(const String &h);
+
 void handleSetPraxis() {
   NEED_ADMIN;
   long from, to, days, from2 = 0, to2 = 0;
@@ -639,6 +737,11 @@ void handleSetPraxis() {
     return;
   }
   String freeDays = server.hasArg("free") ? argTrim("free") : praxisFree;
+  String holiday = server.hasArg("holiday") ? argTrim("holiday") : praxisHoliday;
+  if (holiday.length() && (holiday.length() != 2 || !holidays_known(holiday))) {
+    sendErr(400, F("Bundesland ungültig"));
+    return;
+  }
   if (!freeDaysValid(freeDays)) { sendErr(400, F("Ausnahmetage: z. B. 24.12, 31.12, 3.10.2026")); return; }
   praxisOn    = server.arg("on") == "1";
   praxisDays  = (uint8_t)days;
@@ -647,6 +750,7 @@ void handleSetPraxis() {
   praxisFrom2 = (uint16_t)from2;
   praxisTo2   = (uint16_t)to2;
   praxisFree  = freeDays;
+  praxisHoliday = holiday;
   saveSettings();
   mqttStateDue = true;
   sendOk();
@@ -682,10 +786,117 @@ void handleSetIncoming() {
   sendOk();
 }
 
+// Bundesland-Kuerzel fuer Feiertage bekannt?
+static bool holidays_known(const String &h) {
+  static const char *const ST = "BW BY BE BB HB HH HE MV NI NW RP SL SN ST SH TH";
+  return strstr(ST, h.c_str()) != nullptr && h.indexOf(' ') < 0;
+}
+
+// Klingeln per Anruf: Nummern ("*" = jeder Anrufer, leer = aus)
+void handleSetRing() {
+  NEED_ADMIN;
+  String c = argTrim("callers");
+  if (c != "*" && !dialListValid(c)) { sendErr(400, F("Rufnummern ungültig (je max. 20 Zeichen)")); return; }
+  ringCallers = c;
+  saveSettings();
+  sendOk();
+}
+
+// Zweites Relais
+void handleSetRelay2() {
+  NEED_ADMIN;
+  long dur;
+  String name = argTrim("name");
+  if (!argInt("dur", MIN_BUZZER_SECONDS, MAX_BUZZER_SECONDS, dur) || name.length() < 1 || name.length() > 16) {
+    sendErr(400, F("Name 1-16 Zeichen, Dauer 1-30 s"));
+    return;
+  }
+  bool was    = relay2On;
+  relay2On    = server.arg("on") == "1";
+  relay2User  = server.arg("user") == "1";
+  relay2Name  = name;
+  relay2Seconds = (uint8_t)dur;
+  if (!relay2On && relay2Active) stopRelay2();
+  saveSettings();
+  mqttDiscoveryDue = true;   // Knopf in Home Assistant anlegen/entfernen/umbenennen
+  (void)was;
+  sendOk();
+}
+
+// Weitere Benutzer. Kommt fuer einen bestehenden Namen ein leeres Passwort,
+// bleibt dessen bisheriges Passwort erhalten.
+void handleSetUsers() {
+  NEED_ADMIN;
+  String in = server.arg("users"), out;
+  int start = 0;
+  while (start < (int)in.length()) {
+    int end = in.indexOf(';', start);
+    if (end < 0) end = in.length();
+    String e = in.substring(start, end);
+    int c1 = e.indexOf(':'), c2 = c1 < 0 ? -1 : e.indexOf(':', c1 + 1);
+    if (c1 < 0 || c2 < 0) { sendErr(400, F("Benutzerliste ungültig")); return; }
+    String name = urlDecode(e.substring(0, c1)), pw = e.substring(c1 + 1, c2);
+    if (name == webUser || name == opUser) {
+      sendErr(400, "Name „" + name + "“ ist schon Admin bzw. Tür-Zugang");
+      return;
+    }
+    if (pw.length() == 0) {   // bisheriges Passwort uebernehmen
+      UserEntry u;
+      bool found = false;
+      for (uint8_t i = 0; userAt(i, u); i++)
+        if (u.name == name) { pw = urlEncodeField(u.pw); found = true; break; }
+      if (!found) { sendErr(400, "Passwort für „" + name + "“ fehlt"); return; }
+    }
+    if (out.length()) out += ';';
+    out += e.substring(0, c1 + 1) + pw + e.substring(c2);
+    start = end + 1;
+  }
+  if (!usersValid(out)) {
+    sendErr(400, "Benutzer ungültig (max. " + String(USERS_MAX) + ", Namen eindeutig, Passwort 1-32 Zeichen)");
+    return;
+  }
+  users = out;
+  saveSettings();
+  sendOk();
+}
+
+// Telegram-Bot: Oeffnen per Knopf erlauben, weitere Chats
+void handleSetTelegram() {
+  NEED_ADMIN;
+  String chats = argTrim("chats");
+  if (chats.length() > 100) { sendErr(400, F("Chat-IDs zu lang")); return; }
+  tgOpen  = server.arg("open") == "1";
+  tgChats = chats;
+  saveSettings();
+  sendOk();
+}
+
+// Tastenfeld / RFID
+void handleSetKeypad() {
+  NEED_ADMIN;
+  String cards = argTrim("cards");
+  if (!cardsValid(cards)) { sendErr(400, F("Kartenliste ungültig (Nummer:Name, max. 25)")); return; }
+  wgOn    = server.arg("on") == "1";
+  wgCards = cards;
+  saveSettings();
+  sendOk();
+}
+
+// Apple Home: Ein/Aus wirkt nach Neustart; "reset=1" erzeugt neuen Code
+void handleSetHomekit() {
+  NEED_ADMIN;
+  bool on = server.arg("on") == "1";
+  bool changed = on != hkOn;
+  hkOn = on;
+  if (server.arg("reset") == "1") hkCode = "";
+  saveSettings();
+  server.send(200, "application/json", String("{\"ok\":true,\"restart\":") + (changed ? "true" : "false") + "}");
+}
+
 void handleSetPush() {
   NEED_ADMIN;
   long type, ev;
-  if (!argInt("type", PUSH_OFF, PUSH_TELEGRAM, type) || !argInt("ev", 0, 7, ev)) {
+  if (!argInt("type", PUSH_OFF, PUSH_TELEGRAM, type) || !argInt("ev", 0, 15, ev)) {
     sendErr(400, F("Eingaben ungueltig"));
     return;
   }
@@ -736,7 +947,7 @@ void handleSetWeb() {
   saveSettings();
   sessionsClear(ROLE_NONE);   // alte Sitzungen gelten nicht mehr
   // Wer das Passwort gerade gesetzt hat, bleibt angemeldet
-  if (webPw.length()) sessionCreate(ROLE_ADMIN, false);
+  if (webPw.length()) sessionCreate(ROLE_ADMIN, false, webUser);
   // ArduinoOTA uebernimmt das Passwort nur beim Start -> gilt dort nach Neustart
   sendOk();
 }
@@ -893,6 +1104,14 @@ void webBegin() {
   server.on("/status", handleStatus);
   server.on("/config", handleConfig);
   server.on("/log", handleLog);
+  server.on("/log.csv", handleLogCsv);
+  server.on("/open2", HTTP_POST, handleOpen2);
+  server.on("/setring", HTTP_POST, handleSetRing);
+  server.on("/setrelay2", HTTP_POST, handleSetRelay2);
+  server.on("/setusers", HTTP_POST, handleSetUsers);
+  server.on("/settelegram", HTTP_POST, handleSetTelegram);
+  server.on("/setkeypad", HTTP_POST, handleSetKeypad);
+  server.on("/sethomekit", HTTP_POST, handleSetHomekit);
   server.on("/open", HTTP_POST, handleOpen);
   server.on("/call", HTTP_POST, handleCall);
   server.on("/setduration", HTTP_POST, handleSetDuration);

@@ -44,6 +44,16 @@ void applyCallSeconds() {
   aSip.SetCallSeconds(dtmfPin.length() ? SIP_PIN_CALL_SECONDS : 0);
 }
 
+// Klingeln per Anruf: ist der Anrufer eine der Klingel-Nummern ("*" = jeder)?
+static bool ringFilter(const char *caller) {
+  if (ringCallers.length() == 0) return false;
+  if (ringCallers == "*") return true;
+  String nr;
+  for (uint8_t i = 0; dialTarget(ringCallers, i, nr); i++)
+    if (nr == caller) return true;
+  return false;
+}
+
 // SIP-Client mit den aktuellen Einstellungen (neu) initialisieren. Blockiert
 // nicht: die Anmeldung laeuft danach nebenher in phoneLoop().
 void initSip() {
@@ -57,6 +67,7 @@ void initSip() {
             sipUserBuf, sipPwBuf, SIP_MAX_DIAL_SEC);
   aSip.SetBeepSeconds(SIP_BEEP_SECONDS);
   aSip.SetIncomingSeconds(INCOMING_CALL_SECONDS);
+  aSip.SetRingFilter(ringFilter);
   applyCallSeconds();
   sipInited      = true;
   regFastTries   = 3;   // erster Versuch nach Boot scheitert oft am Timing
@@ -81,7 +92,7 @@ const char *sipStateText() {
 
 // Registrierung rechtzeitig erneuern; ist sie fehlgeschlagen, bald erneut versuchen
 static void registerLoop() {
-  if (WiFi.status() != WL_CONNECTED || sipServer.length() == 0 || aSip.IsRegistering()) return;
+  if (!netUp() || sipServer.length() == 0 || aSip.IsRegistering()) return;
 
   int st = aSip.RegisterStatus();
   if (st != lastRegStatus) {
@@ -251,6 +262,13 @@ static void openByPhone(EventType ev, const String &detail) {
 }
 
 // Ziffern bei einem eingehenden Anruf: ganzer Code muss stimmen, * oder # loescht
+// Oeffnen-Code oder gueltiger Gaestecode (Telefon, Tastenfeld)
+bool checkDoorCode(const String &code, EventType &ev, String &name) {
+  if (dtmfPin.length() && code == dtmfPin) { ev = EV_OPEN_PHONE; name = ""; return true; }
+  if (useGuest(code, name))                { ev = EV_OPEN_GUEST; return true; }
+  return false;
+}
+
 static void incomingDigit(char d) {
   if (d == '*' || d == '#') { dtmfBuf = ""; return; }
   dtmfBuf += d;
@@ -293,6 +311,7 @@ void phoneLoop() {
     lastCheck = millis();
     aSip.SetAcceptIncoming(incomingReady());
   }
+  if (aSip.RingCall()) triggerRing(String("Anruf ") + aSip.RingCaller());
   if (aSip.NewIncoming()) {
     callTries = 0;
     dtmfBuf   = "";

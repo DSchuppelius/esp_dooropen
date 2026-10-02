@@ -16,7 +16,7 @@ bool     mqttStateDue        = false;           // Zustand sofort senden
 // Befehle kurz nach dem Verbinden ignorieren: so loest eine gespeicherte
 // (retained) Nachricht nicht bei jedem Neustart die Tuer aus
 static const uint32_t COMMAND_GRACE_MS = 2000;
-static const char *const COMMANDS[] = { "open", "lock", "callonring", "quiet", "praxis", "duration", "incoming" };
+static const char *const COMMANDS[] = { "open", "open2", "lock", "callonring", "quiet", "praxis", "duration", "incoming" };
 
 bool mqttConnected() {
   return mqtt.connected();
@@ -34,6 +34,7 @@ static void mqttDiscover(const char *component, const char *object, const __Flas
   cfg.replace("$S", ",\"state_topic\":\"" + baseTopic + "/state\"");
   cfg.replace("$C", ",\"command_topic\":\"" + baseTopic + "/");
   cfg.replace("$B", baseTopic);
+  cfg.replace("$N", jsonEsc(relay2Name));
   String p;
   p.reserve(cfg.length() + 300);
   p = "{" + cfg;
@@ -42,7 +43,7 @@ static void mqttDiscover(const char *component, const char *object, const __Flas
   p += F(",\"device\":{\"identifiers\":[\""); p += devId;
   p += F("\"],\"name\":\"Türöffner\",\"manufacturer\":\"DIY\",\"model\":\"ESP SIP-Türöffner\","
          "\"sw_version\":\"" FW_VERSION "\",\"configuration_url\":\"http://");
-  p += WiFi.localIP().toString();
+  p += netIP().toString();
   p += F("\"}}");
   mqtt.publish(discoveryTopic(component, object).c_str(), p.c_str(), true);
 }
@@ -108,6 +109,12 @@ static void mqttPublishDiscovery() {
   mqttDiscover("sensor", "calls", F(
     "\"name\":\"Anrufe\",\"icon\":\"mdi:phone\",\"state_class\":\"total_increasing\",\"entity_category\":\"diagnostic\"$S"
     ",\"value_template\":\"{{ value_json.calls }}\""));
+  if (relay2On) {
+    mqttDiscover("button", "open2", F(
+      "\"name\":\"$N öffnen\",\"icon\":\"mdi:garage-open\"$Copen2/set\""));
+  } else {
+    mqttForget("button", "open2");
+  }
   if (doorOn) {
     mqttDiscover("binary_sensor", "door", F(
       "\"name\":\"Tür\",\"device_class\":\"door\"$S"
@@ -127,6 +134,7 @@ static String mqttStateJson() {
   j = "{\"ringing\":";
   j += isRinging() ? "true" : "false";
   j += ",\"buzzer\":";     j += buzzerActive ? "true" : "false";
+  j += ",\"relay2\":";     j += relay2Active ? "true" : "false";
   j += ",\"sip\":";        j += aSip.IsRegistered() ? "true" : "false";
   j += ",\"sipstate\":\""; j += sipStateText(); j += '"';
   j += ",\"callonring\":"; j += callOnRing ? "true" : "false";
@@ -184,6 +192,8 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
       startBuzzer(EV_OPEN_HA);
       aSip.Hangup();   // wie in der Weboberflaeche: Tuer auf -> Anruf beenden
     }
+  } else if (t == baseTopic + "/open2/set") {
+    if (p == "PRESS" || p == "OPEN" || p == "ON" || p == "1") startRelay2("Home Assistant");
   } else if (t == baseTopic + "/lock/set") {
     if (p == "UNLOCK" || p == "OPEN") {
       startBuzzer(EV_OPEN_HA);
@@ -216,7 +226,7 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
 
 void mqttBegin() {
   // Eindeutige Kennung aus den letzten 3 MAC-Bytes
-  String mac = WiFi.macAddress();
+  String mac = netMac();
   mac.replace(":", "");
   mac.toLowerCase();
   devId     = "tueroeffner_" + mac.substring(6);
@@ -247,7 +257,7 @@ void mqttLoop() {
 
   if (!mqtt.connected()) {
     // Verbindungsaufbau blockiert kurz -> nicht waehrend eines Anrufs oder Summens
-    if (aSip.IsBusy() || buzzerActive || WiFi.status() != WL_CONNECTED) return;
+    if (aSip.IsBusy() || buzzerActive || !netUp()) return;
     if (millis() - mqttLastTry < mqttRetryMs) return;
     mqttLastTry = millis();
 

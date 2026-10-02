@@ -6,6 +6,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <time.h>
+#include "holidays.h"
 
 static Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 
@@ -20,6 +21,11 @@ uint32_t lastSignalOffAt = 0;             // millis, als das Signal zuletzt ende
 bool     doorOpen        = false;
 bool     doorAlerted     = false;
 static uint32_t doorOpenedAt = 0;
+static uint32_t passWatchUntil = 0;       // nach dem Summer: Tuer muss bis dahin aufgehen
+
+bool     relay2Active    = false;
+static uint32_t relay2OffAt = 0;
+static Ticker   relay2Ticker;
 
 bool     hasDisplay      = false;         // OLED beim I2C-Scan gefunden?
 bool     displayDirty    = true;
@@ -49,13 +55,32 @@ bool isQuiet() {
   return quietOn && localNow(lt) && inRange(lt.tm_hour * 60 + lt.tm_min, quietFrom, quietTo);
 }
 
+// Gesetzlicher Feiertag heute im eingestellten Bundesland (sonst nullptr)
+const char *holidayToday() {
+  struct tm lt;
+  if (!praxisHoliday.length() || !localNow(lt)) return nullptr;
+  return holidays::name(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, praxisHoliday.c_str());
+}
+
 bool isPraxis() {
   struct tm lt;
   if (!praxisOn || !localNow(lt)) return false;
   if (!(praxisDays & (1 << ((lt.tm_wday + 6) % 7)))) return false;   // tm_wday: 0 = Sonntag
   if (isFreeDay(lt.tm_mday, lt.tm_mon + 1, lt.tm_year + 1900)) return false;
+  if (holidayToday()) return false;
   uint16_t m = lt.tm_hour * 60 + lt.tm_min;
   return inRange(m, praxisFrom, praxisTo) || inRange(m, praxisFrom2, praxisTo2);
+}
+
+// Darf sich ein Benutzer jetzt anmelden? Tage 0 = alle, Von == Bis = ganztags.
+// Ohne gueltige Uhrzeit nur, wenn kein Zeitfenster eingestellt ist.
+bool userWindowOk(const UserEntry &u) {
+  if (u.days == 0 && u.from == u.to) return true;
+  struct tm lt;
+  if (!localNow(lt)) return false;
+  if (u.days && !(u.days & (1 << ((lt.tm_wday + 6) % 7)))) return false;
+  if (u.from == u.to) return true;
+  return inRange(lt.tm_hour * 60 + lt.tm_min, u.from, u.to);
 }
 
 // ------------------------------------------------------------
@@ -77,6 +102,10 @@ static const char *openSourceName(EventType source) {
     case EV_OPEN_PHONE: return "Telefon";
     case EV_OPEN_HA:    return "Home Assistant";
     case EV_OPEN_GUEST: return "Gästecode";
+    case EV_OPEN_TELEGRAM: return "Telegram";
+    case EV_OPEN_KEYPAD:   return "Tastenfeld";
+    case EV_OPEN_CARD:     return "Karte";
+    case EV_OPEN_HOMEKIT:  return "Apple Home";
     default:            return "automatisch";
   }
 }
@@ -90,6 +119,9 @@ void startBuzzer(EventType source, const String &detail) {
   logEvent(source, detail);
   relayPin(true);
   buzzerTicker.once_ms((uint32_t)buzzerSeconds * 1000UL, buzzerTimeout);
+  // Mit Tuerkontakt: geht die Tuer danach wirklich auf?
+  passWatchUntil = doorOn && !doorOpen
+                 ? (millis() + ((uint32_t)buzzerSeconds + DOOR_PASS_WINDOW_SEC) * 1000UL) | 1 : 0;
   markActivity();
   displayDirty = true;
   mqttStateDue = true;
@@ -105,6 +137,38 @@ void stopBuzzer() {
   buzzerActive = false;
   relayPin(false);
   displayDirty = true;
+  mqttStateDue = true;
+}
+
+// ------------------------------------------------------------
+//  Zweites Relais (z.B. Tor, zweite Tuer)
+// ------------------------------------------------------------
+static void relay2Pin(bool on) {
+  digitalWrite(PIN_RELAY2, (RELAY2_ACTIVE_LOW ? !on : on) ? HIGH : LOW);
+}
+
+static void relay2Timeout() {
+  relay2Pin(false);
+}
+
+// who = Quelle fuer das Protokoll ("Web Anna", "Home Assistant", ...)
+bool startRelay2(const String &who) {
+  if (!relay2On) return false;
+  relay2Active = true;
+  relay2OffAt  = millis() + (uint32_t)relay2Seconds * 1000UL;
+  relay2Pin(true);
+  relay2Ticker.once_ms((uint32_t)relay2Seconds * 1000UL, relay2Timeout);
+  logEvent(EV_OPEN2, relay2Name + (who.length() ? " – " + who : String()));
+  queuePush(PUSH_EV_OPEN, relay2Name + " geöffnet" + (who.length() ? " (" + who + ")" : String()));
+  markActivity();
+  mqttStateDue = true;
+  return true;
+}
+
+void stopRelay2() {
+  relay2Ticker.detach();
+  relay2Active = false;
+  relay2Pin(false);
   mqttStateDue = true;
 }
 
@@ -185,9 +249,9 @@ static void drawDisplay() {
   display.drawFastHLine(0, 10, OLED_WIDTH, SSD1306_WHITE);
 
   display.setCursor(0, 16);
-  if (WiFi.status() == WL_CONNECTED) {
+  if (netUp()) {
     display.print(F("IP "));
-    display.println(WiFi.localIP().toString());
+    display.println(netIP().toString());
   } else if (portalActive) {
     display.println(F("WLAN: Einrichtung"));
   } else {
@@ -253,7 +317,7 @@ static void updateDisplay() {
   static bool lastRinging = false;
   static bool lastWifi    = false;
   bool ringing = isRinging();
-  bool wifi    = WiFi.status() == WL_CONNECTED;
+  bool wifi    = netUp();
   if (ringing != lastRinging || wifi != lastWifi) {
     lastRinging  = ringing;
     lastWifi     = wifi;
@@ -278,7 +342,7 @@ static void ledLoop() {
   bool on;
   if (buzzerActive)                                      on = true;
   else if (portalActive)                                 on = (t / 100) % 2;
-  else if (WiFi.status() != WL_CONNECTED)                on = (t / 500) % 2;
+  else if (!netUp())                on = (t / 500) % 2;
   else if (sipServer.length() && !aSip.IsRegistered())   on = (t % 2000) < 100;
   else                                                   on = false;
   static int8_t last = -1;
@@ -292,19 +356,38 @@ static void ledLoop() {
 //  Eingaenge (entprellt)
 // ------------------------------------------------------------
 // Klingeln auswerten: Praxis-Modus oeffnet, sonst Rufkette (ausser Nachtruhe)
-static void onRing() {
+static void onRing(const String &detail) {
   mqttRing();
+  homekitRing();
   if (isPraxis()) {
-    logEvent(EV_RING);
+    logEvent(EV_RING, detail);
     startBuzzer(EV_OPEN_AUTO);
     queuePush(PUSH_EV_RING, "Es hat geklingelt – Tür automatisch geöffnet (Praxis-Modus)");
     return;
   }
   bool quiet = isQuiet();
-  logEvent(quiet ? EV_RING_QUIET : EV_RING);
-  queuePush(PUSH_EV_RING, quiet ? "Es klingelt an der Tür (Nachtruhe)" : "Es klingelt an der Tür");
+  logEvent(quiet ? EV_RING_QUIET : EV_RING, detail);
+  // Telegram: Mitteilung mit "Oeffnen"-Knopf (falls erlaubt)
+  queuePush(PUSH_EV_RING, quiet ? "Es klingelt an der Tür (Nachtruhe)" : "Es klingelt an der Tür", true);
   pushLoop();   // ESP8266: Mitteilung vor dem Anruf raus, sonst erst nach dem Anruf
   if (callOnRing && !quiet) startChain();
+}
+
+// Klingeln zaehlen und auswerten; Sturmklingeln (kurz hintereinander) nur zaehlen
+static void ringNow(const String &detail) {
+  bool cooldown = lastRingAt != 0 && millis() - lastRingAt < RING_COOLDOWN_MS;
+  signalCount++;
+  stateChanged();
+  lastRingAt = millis();
+  markActivity();
+  displayDirty = true;
+  if (!cooldown) onRing(detail);
+}
+
+// Klingeln aus einer anderen Quelle (z.B. Anruf der TK-Anlage)
+void triggerRing(const String &detail) {
+  ringNow(detail);
+  lastSignalOffAt = millis();   // Weboberflaeche: "Signal aktiv" kurz anzeigen
 }
 
 // Klingel-Taster wirkt wie ein zweiter Kontakt parallel zum Klingelsignal.
@@ -333,13 +416,7 @@ static void handleSignalInput() {
   if ((millis() - changedAt) > SIGNAL_DEBOUNCE_MS && pressed != signalActive) {
     signalActive = pressed;
     if (signalActive) {
-      // Sturmklingeln: kurz hintereinander nur zaehlen, nicht erneut melden/anrufen
-      bool cooldown = lastRingAt != 0 && millis() - lastRingAt < RING_COOLDOWN_MS;
-      signalCount++;
-      stateChanged();
-      lastRingAt = millis();
-      markActivity();
-      if (!cooldown) onRing();
+      ringNow(String());
     } else {
       lastSignalOffAt = millis();
     }
@@ -382,10 +459,20 @@ static void handleDoorContact() {
   }
   if ((millis() - changedAt) > SIGNAL_DEBOUNCE_MS && open != doorOpen) {
     doorOpen = open;
-    if (open) doorOpenedAt = millis();
+    if (open) {
+      doorOpenedAt = millis();
+      if (passWatchUntil) { passWatchUntil = 0; logEvent(EV_DOOR_PASSED); }
+      else if (!buzzerActive) logEvent(EV_DOOR_OPENED);
+    }
     doorAlerted  = false;
     mqttStateDue = true;
     displayDirty = true;
+  }
+  // Summer war an, Tuer ging aber nicht auf (niemand hereingekommen)
+  if (passWatchUntil && (int32_t)(millis() - passWatchUntil) >= 0) {
+    passWatchUntil = 0;
+    logEvent(EV_DOOR_UNUSED);
+    queuePush(PUSH_EV_UNUSED, "Summer ausgelöst, aber die Tür blieb zu");
   }
   if (doorOpen && doorAlertMin && !doorAlerted &&
       millis() - doorOpenedAt > (uint32_t)doorAlertMin * 60000UL) {
@@ -402,6 +489,8 @@ void doorBegin() {
   // nach dem Umschalten setzen (Mikrosekunden, ein Relais zieht dabei nicht an).
   pinMode(PIN_RELAY, OUTPUT);
   relayPin(false);
+  pinMode(PIN_RELAY2, OUTPUT);
+  relay2Pin(false);
   pinMode(PIN_STATUS_LED, OUTPUT);
   digitalWrite(PIN_STATUS_LED, STATUS_LED_ACTIVE_LOW ? HIGH : LOW);
 #else
@@ -409,6 +498,8 @@ void doorBegin() {
   // active-low-Relais beim Start kurz an.
   relayPin(false);
   pinMode(PIN_RELAY, OUTPUT);
+  relay2Pin(false);
+  pinMode(PIN_RELAY2, OUTPUT);
   digitalWrite(PIN_STATUS_LED, STATUS_LED_ACTIVE_LOW ? HIGH : LOW);
   pinMode(PIN_STATUS_LED, OUTPUT);
 #endif
@@ -423,6 +514,7 @@ void doorLoop() {
   handleBuzzerButton();
   handleDoorContact();
   if (buzzerActive && (int32_t)(millis() - buzzerOffAt) >= 0) stopBuzzer();
+  if (relay2Active && (int32_t)(millis() - relay2OffAt) >= 0) stopRelay2();
   ledLoop();
   if (hasDisplay) updateDisplay();
 }

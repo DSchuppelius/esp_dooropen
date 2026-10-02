@@ -63,6 +63,9 @@ Sip::Sip(char *pBuf, size_t lBuf) {
   pMyIp = "";
   caRead[0] = 0;
   caInCaller[0] = 0;
+  caRingCaller[0] = 0;
+  caLastCaller[0] = 0;
+  caRingCallId[0] = 0;
 }
 
 
@@ -952,6 +955,21 @@ bool Sip::ParseOffer(const char *p) {
 }
 
 
+// Rufnummer aus der From-Zeile ("sip:NUMMER@...") nach out
+static void CallerFrom(const char *from, char *out, size_t len) {
+  out[0] = 0;
+  const char *u = strstr(from, "sip:");
+  if ( !u )
+    return;
+  u += 4;
+  const char *at = strpbrk(u, "@;>");
+  size_t l = at ? (size_t)(at - u) : strlen(u);
+  if ( l >= len ) l = len - 1;
+  memcpy(out, u, l);
+  out[l] = 0;
+}
+
+
 void Sip::HandleIncomingInvite(const char *p) {
 
   // Re-INVITE im laufenden eingehenden Gespraech (z.B. Media-Wechsel)
@@ -963,6 +981,25 @@ void Sip::HandleIncomingInvite(const char *p) {
     iInCSeq = GrepInteger(p, "\nCSeq: ");
     if ( strstr(p, "\nm=audio ") ) ParseOffer(p);
     SendIncomingOk();
+    return;
+  }
+
+  // Nummer des Anrufers merken (zum Einrichten) und pruefen, ob es ein
+  // Klingel-Anruf ist: dann abweisen (486 = nur hier besetzt, nicht 6xx -
+  // sonst bricht die Anlage evtl. den ganzen Gruppenruf ab) und melden
+  char from[160], callId[100];
+  if ( HeaderValue(p, "\nFrom: ", from, sizeof(from)) )
+    CallerFrom(from, caLastCaller, sizeof(caLastCaller));
+  if ( pRingFilter && pRingFilter(caLastCaller) )
+  {
+    Respond(p, 486, "Busy Here");
+    // INVITE-Wiederholungen (gleiche Call-ID) nur einmal melden
+    if ( HeaderValue(p, "\nCall-ID: ", callId, sizeof(callId)) && strcmp(callId, caRingCallId) != 0 )
+    {
+      strcpy(caRingCallId, callId);
+      strcpy(caRingCaller, caLastCaller);
+      bRingCall = true;
+    }
     return;
   }
 
@@ -1005,18 +1042,8 @@ void Sip::HandleIncomingInvite(const char *p) {
   if ( !caInContact[0] )
     snprintf(caInContact, sizeof(caInContact), "sip:%s", pSipIp);
 
-  // Rufnummer des Anrufers fuer das Protokoll: "sip:NUMMER@..."
-  caInCaller[0] = 0;
-  const char *u = strstr(caInFrom, "sip:");
-  if ( u )
-  {
-    u += 4;
-    const char *at = strpbrk(u, "@;>");
-    size_t l = at ? (size_t)(at - u) : strlen(u);
-    if ( l >= sizeof(caInCaller) ) l = sizeof(caInCaller) - 1;
-    memcpy(caInCaller, u, l);
-    caInCaller[l] = 0;
-  }
+  // Rufnummer des Anrufers fuer das Protokoll
+  CallerFrom(caInFrom, caInCaller, sizeof(caInCaller));
 
   if ( !ParseOffer(p) )
   {
