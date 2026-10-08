@@ -160,10 +160,44 @@ static void testOutgoing() {
   s.Rtp.rx.push_back({SERVER, ev});
   s.Processing(inBuf, sizeof(inBuf));
   CHECK(s.ReadDtmf() == '*', "schnelle Wiederholung erkannt");
+  // 30-ms-Audio (252 Bytes) darf den Empfang nicht blockieren (ESP32)
+  std::string audio(12 + 240, (char)0xD5);
+  audio[0] = (char)0x80; audio[1] = 8;
+  s.Rtp.rx.push_back({SERVER, audio});
+  ev[7] = 4;
+  s.Rtp.rx.push_back({SERVER, ev});
+  s.Processing(inBuf, sizeof(inBuf));
+  CHECK(s.ReadDtmf() == '*', "DTMF nach langem Audio-Paket");
   s.Hangup();
   CHECK(lastSent(s).rfind("BYE sip:0171234567890123@192.168.1.10 SIP/2.0", 0) == 0, "BYE");
   CHECK(header(lastSent(s), "CSeq: ") == "3 BYE", "BYE CSeq hoeher als INVITE");
   CHECK(!s.IsBusy(), "Anruf beendet");
+
+  // Zweiter Anruf: Medien von anderer Adresse als die Anlage, telephone-event
+  // in der Antwort auf PT 96. Ein spaetes Ende-Paket des vorigen Gespraechs
+  // liegt noch im Empfangspuffer und darf nicht als neue Taste zaehlen.
+  ev[7] = 4;
+  s.Rtp.rx.push_back({SERVER, ev});
+  CHECK(s.Dial("100", "Tuer"), "zweiter Anruf");
+  std::string cid2 = header(lastSent(s), "Call-ID: ");
+  feed(s, "SIP/2.0 200 OK\r\nVia: v\r\nFrom: <sip:200@192.168.1.10>;tag=1\r\nTo: <sip:100@192.168.1.10>;tag=x\r\n"
+          "Call-ID: " + cid2 + "\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\n\r\n"
+          "v=0\r\nc=IN IP4 192.168.1.20\r\nm=audio 10000 RTP/AVP 8 96\r\na=rtpmap:96 telephone-event/8000\r\n");
+  CHECK(s.bInCall && s.dtmfPt == 96, "zweiter Anruf angenommen, DTMF-PT 96");
+  CHECK(s.ReadDtmf() == 0, "altes Paket des vorigen Gespraechs verworfen");
+  ev[7] = 5;
+  s.Rtp.rx.push_back({SERVER, ev});
+  s.Processing(inBuf, sizeof(inBuf));
+  CHECK(s.ReadDtmf() == '*', "DTMF mit angebotenem PT 101 von der Anlage");
+  ev[1] = 96; ev[7] = 6;
+  s.Rtp.rx.push_back({IPAddress(192, 168, 1, 20), ev});
+  s.Rtp.rx.push_back({IPAddress(6, 6, 6, 6), ev});
+  s.Processing(inBuf, sizeof(inBuf));
+  CHECK(s.ReadDtmf() == '*', "DTMF mit PT der Antwort");
+  char info[128];
+  s.CallInfo(info, sizeof(info));
+  CHECK(std::string(info) == "PCMA, DTMF-PT 96, Gegenstelle 192.168.1.20, RTP 2, Tasten 2, verworfen 1 von 6.6.6.6", "Diagnose");
+  s.Hangup();
 }
 
 static void testIncoming() {

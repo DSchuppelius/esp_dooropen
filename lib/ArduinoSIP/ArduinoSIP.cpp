@@ -357,7 +357,7 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
     {
       // DTMF per SIP INFO (application/dtmf-relay): "Signal=*"
       const char *sig = strstr(p, "Signal=");
-      if ( sig ) { char c = sig[7]; if ( c == ' ' ) c = sig[8]; if ( c > ' ' ) cLastDtmf = c; }
+      if ( sig ) { char c = sig[7]; if ( c == ' ' ) c = sig[8]; if ( c > ' ' ) { cLastDtmf = c; iDtmfRx++; } }
       Respond(p, 200, "OK");
     }
     return;
@@ -1228,6 +1228,10 @@ void Sip::StartStream(int beepSec) {
     bToneReady = true;
   }
   if (!bRtpBound) { Rtp.begin(iRtpPort); bRtpBound = true; }
+  // Liegengebliebene Pakete verwerfen - z.B. die wiederholten Ende-Pakete der
+  // Taste, mit der das vorige Gespraech endete (sonst zaehlt ein alter '*')
+  RtpSkipRest();
+  while (Rtp.parsePacket() > 0) RtpSkipRest();
 
   rtpSeq  = (uint16_t)Random();
   rtpTs   = Random();
@@ -1237,6 +1241,10 @@ void Sip::StartStream(int beepSec) {
   rtpFrame = 0;
   iStreamBeepSec = beepSec;
   bDtmfTsValid = false;
+  iRtpRx = 0;
+  iRtpForeign = 0;
+  foreignRtpIp = IPAddress((uint32_t)0);
+  iDtmfRx = 0;
   bInCall = true;
 #ifdef DEBUGLOG
   Serial.printf("\r\n----- RTP start -> %s:%i -----\r\n", remoteRtpIp.toString().c_str(), remoteRtpPort);
@@ -1271,14 +1279,26 @@ void Sip::RtpProcessing() {
   if (!bInCall) return;
 
   // Eingehende RTP-Pakete lesen: DTMF via telephone-event (RFC 4733).
-  // Nur Pakete von der ausgehandelten Gegenstelle zaehlen.
+  // Nur Pakete der ausgehandelten Gegenstelle oder der Anlage selbst zaehlen
+  // (manche Anlagen senden von einer anderen Adresse als im SDP angegeben).
   int ps;
   while ( (ps = Rtp.parsePacket()) > 0 )
   {
     uint8_t rb[180];
-    bool fromPeer = Rtp.remoteIP() == remoteRtpIp;
+    IPAddress from = Rtp.remoteIP();
     int n = Rtp.read(rb, sizeof(rb));
-    if ( fromPeer && n >= 16 && (rb[1] & 0x7F) == dtmfPt )
+    RtpSkipRest();
+    if ( !(from == remoteRtpIp) && !((uint32_t)sipAddr && from == sipAddr) )
+    {
+      iRtpForeign++;
+      foreignRtpIp = from;
+      continue;
+    }
+    iRtpRx++;
+    // Bei eigenen Anrufen sendet die Gegenstelle laut RFC 3264 mit dem PT
+    // unseres Angebots (101), manche Anlagen aber mit dem ihrer Antwort.
+    uint8_t pt = rb[1] & 0x7F;
+    if ( n >= 16 && (pt == dtmfPt || (!bIncoming && pt == 101)) )
     {
       uint8_t  event  = rb[12];
       bool     endbit = rb[13] & 0x80;
@@ -1292,7 +1312,7 @@ void Sip::RtpProcessing() {
         if ( event <= 9 )       c = '0' + event;
         else if ( event == 10 ) c = '*';
         else if ( event == 11 ) c = '#';
-        if ( c ) cLastDtmf = c;
+        if ( c ) { cLastDtmf = c; iDtmfRx++; }
       }
     }
   }
@@ -1314,6 +1334,30 @@ void Sip::RtpProcessing() {
   {
     SendRtpFrame();
     lastRtpAt += 20;
+  }
+}
+
+// Rest des aktuellen RTP-Pakets verwerfen. Beim ESP32 noetig: solange ein Paket
+// nicht ganz gelesen ist, liefert parsePacket() kein neues mehr - ein einziges
+// grosses Paket (z.B. 30 ms Audio = 252 Bytes) wuerde den Empfang bis zum
+// Neustart blockieren. flush() verwirft nur beim ESP32 (ESP8266: endPacket()).
+void Sip::RtpSkipRest() {
+  uint8_t junk[64];
+  while ( Rtp.available() > 0 && Rtp.read(junk, sizeof(junk)) > 0 ) {}
+}
+
+// Laufendes bzw. letztes Gespraech fuer das Protokoll
+void Sip::CallInfo(char *out, size_t len) {
+  uint32_t a = (uint32_t)remoteRtpIp;
+  int l = snprintf(out, len, "%s, DTMF-PT %u, Gegenstelle %u.%u.%u.%u, RTP %u, Tasten %u",
+                   rtpPt == 8 ? "PCMA" : "PCMU", dtmfPt,
+                   (unsigned)(a & 0xFF), (unsigned)((a >> 8) & 0xFF), (unsigned)((a >> 16) & 0xFF), (unsigned)(a >> 24),
+                   iRtpRx, iDtmfRx);
+  if ( iRtpForeign && l > 0 && (size_t)l < len )
+  {
+    uint32_t f = (uint32_t)foreignRtpIp;
+    snprintf(out + l, len - l, ", verworfen %u von %u.%u.%u.%u", iRtpForeign,
+             (unsigned)(f & 0xFF), (unsigned)((f >> 8) & 0xFF), (unsigned)((f >> 16) & 0xFF), (unsigned)(f >> 24));
   }
 }
 

@@ -12,11 +12,14 @@ class WiFiUDP {
   IPAddress curFrom;
   int port = 0;
   uint8_t begin(uint16_t p) { port = p; return 1; }
+  // Wie der ESP32: ein neues Paket gibt es erst, wenn das vorige ganz gelesen
+  // ist; laengere Pakete schneidet recvfrom() bei 1460 Bytes ab.
   int parsePacket() {
-    if (rx.empty()) { cur.clear(); return 0; }
-    cur = rx.front().data; curFrom = rx.front().from; rx.pop_front();
+    if (!cur.empty() || rx.empty()) return 0;
+    cur = rx.front().data.substr(0, 1460); curFrom = rx.front().from; rx.pop_front();
     return (int)cur.size();
   }
+  int available() { return (int)cur.size(); }
   int read(char *buf, size_t len) {
     size_t n = cur.size() < len ? cur.size() : len;
     memcpy(buf, cur.data(), n);

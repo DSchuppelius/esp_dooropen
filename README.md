@@ -513,7 +513,7 @@ Werkzeuge können statt der Anmeldeseite **Basic-Auth** verwenden, z. B.:
   weiter. Ohne Passwort ist die Oberfläche zudem nur über IP-Adresse oder
   `tueroeffner(.local)` erreichbar (Schutz vor DNS-Rebinding).
 - **SIP**: Anfragen (Anrufe, DTMF per INFO) werden nur von der Telefonanlage
-  angenommen, DTMF-Töne per RTP nur von der Gegenstelle des Gesprächs.
+  angenommen, DTMF-Töne per RTP nur von der Gegenstelle des Gesprächs oder der Anlage.
 - **Home Assistant**: „Tür öffnen“ reagiert nur auf `PRESS`/`OPEN`/`UNLOCK`; Befehle
   direkt nach dem Verbinden und gespeicherte (*retained*) Befehle werden ignoriert
   bzw. gelöscht – eine versehentlich gespeicherte Nachricht öffnet also nicht bei
@@ -599,7 +599,7 @@ Zertifikatsprüfung.
 
 Unter **Dienste → Syslog** einen Server eintragen (UDP 514, z. B. rsyslog, Synology
 Log Center oder das Home-Assistant-Add-on). Der ESP schickt dann alle Meldungen
-(Start, WLAN, SIP-Anmeldung, MQTT, Ereignisse) dorthin – ideal zur Fehlersuche bei
+(Start, WLAN, SIP-Anmeldung, Gespräche, MQTT, Ereignisse) dorthin – ideal zur Fehlersuche bei
 einer Kundeninstallation. Codes und Passwörter werden nicht übertragen.
 
 ## Apple Home (HomeKit)
@@ -710,8 +710,13 @@ Grundeinstellungen in [src/config.h](src/config.h), u. a.:
 | `KEYPAD_LOCK_FAILS`      | 5               | Fehlversuche am Tastenfeld bis zur Sperre (`KEYPAD_LOCK_MIN`) |
 | `TELEGRAM_BUTTON_SEC`    | 180             | Gültigkeit des Telegram-Knopfs „Öffnen“            |
 
-**Fehlersuche SIP:** In [platformio.ini](platformio.ini) `build_flags = -DDEBUGLOG`
-einkommentieren – dann werden alle SIP-Pakete seriell ausgegeben.
+**Fehlersuche SIP:** Nach jedem Gespräch steht eine Zeile im Log (seriell/Syslog), z. B.
+`SIP: Gespraech beendet (PCMA, DTMF-PT 101, Gegenstelle 192.168.20.247, RTP 312, Tasten 1)`.
+`RTP 0` heißt: kein Audio vom Telefon angekommen; `Tasten 0` trotz Tastendruck: die Anlage
+schickt DTMF nicht per RFC 4733/SIP INFO (z. B. nur als Ton im Audio – in der Anlage
+umstellen); `verworfen … von <IP>`: RTP kam von einer unerwarteten Adresse.
+Für alle SIP-Pakete in [platformio.ini](platformio.ini) `build_flags = -DDEBUGLOG`
+einkommentieren – dann werden sie seriell ausgegeben.
 
 ## Projektstruktur
 

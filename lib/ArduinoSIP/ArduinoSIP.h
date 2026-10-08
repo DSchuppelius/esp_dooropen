@@ -102,6 +102,11 @@ class Sip
     // Nummer des letzten Anrufers (egal ob angenommen) - zum Einrichten
     const char *LastCaller() { return caLastCaller; }
 
+    // Diagnose (Erweiterung): laeuft gerade RTP? CallInfo() beschreibt das
+    // laufende bzw. letzte Gespraech (Codec, DTMF, empfangene Pakete).
+    bool        InCall() { return bInCall; }
+    void        CallInfo(char *out, size_t len);
+
   private:
     char       *pbuf;
     size_t      lbuf;
@@ -196,6 +201,10 @@ class Sip
     char        cLastDtmf = 0;
     uint32_t    lastDtmfTs = 0;   // RTP-Zeitstempel des letzten DTMF-Ereignisses
     bool        bDtmfTsValid = false;
+    uint16_t    iRtpRx = 0;       // Diagnose: angenommene RTP-Pakete
+    uint16_t    iRtpForeign = 0;  //           verworfene (fremder Absender)
+    IPAddress   foreignRtpIp;     //           letzter fremder Absender
+    uint8_t     iDtmfRx = 0;      //           erkannte Tasten (RTP und INFO)
 
 	void        HandleUdpPacket(const char *p, bool fromServer);
 	void        AddSipLine(const char* constFormat , ... );
@@ -239,6 +248,7 @@ class Sip
     void        StartStream(int beepSec);
     void        StopCall();
     void        RtpProcessing();
+    void        RtpSkipRest();
     void        SendRtpFrame();
     uint8_t     Lin2Ulaw(int16_t sample);
     uint8_t     Lin2Alaw(int16_t sample);

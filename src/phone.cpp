@@ -305,6 +305,15 @@ void phoneLoop() {
   aSip.Processing(acSipIn, sizeof(acSipIn));
   registerLoop();
 
+  // Nach jedem Gespraech eine Zeile zur Diagnose (Audio und Tasten beim Kunden)
+  static bool wasInCall = false;
+  if (wasInCall && !aSip.InCall()) {
+    char info[128];
+    aSip.CallInfo(info, sizeof(info));
+    logMsg("SIP: Gespraech beendet (%s)", info);
+  }
+  wasInCall = aSip.InCall();
+
   // Annahme eingehender Anrufe nachfuehren (Einstellung, Sperre, Codes, Ablauf)
   static uint32_t lastCheck = 0;
   if (millis() - lastCheck > 1000) {
