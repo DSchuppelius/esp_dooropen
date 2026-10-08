@@ -123,6 +123,12 @@
 // Klingelsignal ueber Optokoppler an Wechselspannung pulst mit 50 Hz (alle 20 ms):
 // so lange nach dem letzten aktiven Pegel gilt das Signal noch als aktiv (ms)
 #define SIGNAL_AC_HOLD_MS        40
+// Das Klingelsignal allein (ohne Taster) zaehlt erst ab so vielen aktiven Abtastungen
+// im Entprellfenster - sonst reichten zwei Stoerspitzen (je SIGNAL_AC_HOLD_MS gehalten)
+#define SIGNAL_MIN_SAMPLES       3
+// Klingeln waehrend des Summers und so lange danach (ms) ignorieren: Einkopplung vom
+// Tueroeffner auf die Klingelleitung (im Praxis-Modus oeffnete das sonst erneut)
+#define RING_BUZZER_GUARD_MS     300
 // Weboberflaeche: "Signal aktiv" nach dem Loslassen noch so lange zeigen (ms),
 // sonst verpasst die 1-s-Abfrage kurze Tastendruecke
 #define SIGNAL_HOLD_MS           3000
@@ -138,6 +144,13 @@
 // Wie lange das Einrichtungs-WLAN offen bleibt, wenn das bekannte WLAN fehlt (s).
 // Waehrenddessen laufen Klingel, Taster und Summer normal weiter.
 #define WIFI_PORTAL_SECONDS      300
+// Sind Zugangsdaten gespeichert, oeffnet das Einrichtungs-WLAN erst nach so vielen
+// Minuten ohne Verbindung (nach Stromausfall startet der Router oft langsamer als
+// der ESP). Die Station verbindet dabei weiter (WLAN-Einrichtung und Station parallel).
+#define WIFI_PORTAL_AFTER_MIN    15
+// WLAN weg: so lange (s) warten, dann alle WIFI_RETRY_SEC neu verbinden (der
+// ESP32-Core gibt bei manchen Trennungsgruenden auf, z.B. falsches Passwort)
+#define WIFI_RETRY_SEC           60
 // Name im Netz: http://tueroeffner.local (mDNS), auch fuer OTA-Updates
 #define HOSTNAME                 "tueroeffner"
 
@@ -145,6 +158,9 @@
 //  Uhrzeit (NTP) fuer Protokoll und Nachtruhe
 // ============================================================
 #define NTP_SERVER   "pool.ntp.org"
+// Ausweich-Server. Dazwischen wird das Gateway gefragt (Router/TK-Anlage bieten oft
+// NTP an) - so gibt es auch ohne Internet eine gueltige Uhrzeit.
+#define NTP_SERVER2  "de.pool.ntp.org"
 #define TIME_ZONE    "CET-1CEST,M3.5.0,M10.5.0/3"   // Mitteleuropa mit Sommerzeit
 
 // ============================================================
@@ -159,12 +175,20 @@
 // Notfall: Klingel-Taster beim Einschalten so lange halten (ms)
 // -> Passwoerter weg und wieder DHCP statt fester IP
 #define PW_RESET_HOLD_MS 5000
+// ... und danach innerhalb dieser Zeit (ms) loslassen. Bleibt er gedrueckt
+// (klemmender Taster, Feuchte), gibt es keinen Reset.
+#define PW_RESET_RELEASE_MS 10000
 
 // ============================================================
 //  Selbstheilung
 // ============================================================
-// Neustart, wenn das WLAN so lange (Minuten) weg ist
-#define WIFI_LOST_RESTART_MIN   10
+// Neustart, wenn das WLAN so lange (Minuten) weg ist. Letzte Stufe: vorher
+// verbindet die Station alle WIFI_RETRY_SEC neu, nach WIFI_PORTAL_AFTER_MIN oeffnet
+// das Einrichtungs-WLAN. Ist es gerade offen, erst nach der doppelten Zeit.
+#define WIFI_LOST_RESTART_MIN   30
+// Ethernet: Neustart nur, wenn ein Link da ist, aber so lange (Minuten) keine IP
+// kommt. Bei gezogenem Kabel hilft ein Neustart nicht.
+#define ETH_NO_IP_RESTART_MIN   10
 // Neustart, wenn der freie Speicher darunter faellt (Bytes)
 #define MIN_FREE_HEAP           8000
 // ... oder der groesste zusammenhaengende Block (Zerstueckelung, v.a. ESP8266)
@@ -180,11 +204,25 @@
 #define AUTH_MAX_FAILS          5
 // ... zunaechst fuer so viele Sekunden, bei weiteren Fehlern laenger (max. 15 min)
 #define AUTH_LOCK_SEC           60
+// Groessere Antworten (Startseite, CSV-Export) hoechstens so lange senden (ms): die
+// Loop (Klingel, SIP) steht waehrenddessen. Liest die Gegenstelle nicht -> Abbruch.
+#define WEB_SEND_MAX_MS         5000
 
 // ============================================================
 //  Push-Mitteilungen (ntfy / Telegram), im Web einstellbar
 // ============================================================
-#define PUSH_TIMEOUT_MS         4000
+// ESP32: Frist fuer Verbindung und Antwort (eigener Task). ESP8266: Zeitbudget je
+// Mitteilung insgesamt (DNS, Verbindung, TLS, Antwort) - die Loop steht so lange.
+#define PUSH_TIMEOUT_MS         5000
+// ESP8266: davon hoechstens fuer die Namensaufloesung (ms)
+#define PUSH_DNS_TIMEOUT_MS     2000
+// ESP8266: HTTPS nur mit so viel freiem Speicher, sonst wird die Mitteilung
+// uebersprungen (BearSSL: 16 KB Empfangspuffer am Stueck, 6 KB Stack, 3 KB Kontext;
+// scheitert eine Reservierung, bricht der Core mit abort() ab)
+#define PUSH_TLS_MIN_BLOCK      17000
+#define PUSH_TLS_MIN_HEAP       27000
+// ESP8266: so viele Mitteilungen warten hoechstens (sonst faellt die aelteste weg)
+#define PUSH_QUEUE_LEN          3
 
 // Wie lange ein Anruf mit Oeffnungs-Code nach dem Abheben offen bleibt (s)
 #define SIP_PIN_CALL_SECONDS    30
@@ -210,8 +248,18 @@
 // "Tuer blieb zu" (s)
 #define DOOR_PASS_WINDOW_SEC    10
 // Langer Verlauf im LittleFS (CSV-Export): je Datei hoechstens so viele Bytes,
-// danach wird sie zur ".old"-Datei (also insgesamt etwa das Doppelte)
+// danach wird sie zur ".old"-Datei (also insgesamt etwa das Doppelte).
+// ESP32: nur 128 KB LittleFS (min_spiffs.csv) -> kleiner, Platz fuer Einstellungen
+#if defined(ESP32)
+#define EVENT_FILE_MAX          24000
+#else
 #define EVENT_FILE_MAX          48000
+#endif
+// So viel muss im LittleFS frei bleiben (Einstellungen, Zaehler, Sitzungen samt
+// Hilfsdateien); sonst wird zuerst der aeltere Verlauf geloescht
+#define FS_RESERVE_BYTES        24576
+// Langen Verlauf gebuendelt schreiben: hoechstens einmal je so viele ms (Flash schonen)
+#define EVENT_FLUSH_MS          60000UL
 // Weitere Benutzer (zusaetzlich zu Admin und Tuer-Zugang)
 #define USERS_MAX               8
 // Tastenfeld: falsche Codes bis zur Sperre und deren Dauer
@@ -251,6 +299,10 @@
 #define MQTT_DISCOVERY_PREFIX  "homeassistant"
 // Max. Wartezeit beim Verbindungsaufbau; die Loop steht solange (ms).
 #define MQTT_CONNECT_TIMEOUT_MS 1000
+// Broker-Name: so lange auf die DNS-Antwort warten (ms; blockiert die Loop nicht)
+#define MQTT_DNS_TIMEOUT_MS     5000
+// Pause zwischen Verbindungsversuchen: verdoppelt sich je Fehlschlag bis hierhin (ms)
+#define MQTT_RETRY_MAX_MS       300000UL
 
 // Bildschirmschoner: OLED nach X Sekunden ohne Aktivitaet ausschalten (0 = nie).
 #define SCREEN_TIMEOUT_SECONDS 60

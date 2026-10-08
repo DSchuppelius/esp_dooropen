@@ -240,7 +240,7 @@
       "internal_id": "",
       "mfg": "",
       "mpn": "",
-      "sch_revision": ""
+      "sch_revision": "0.1"
     },
     "layer_pairs": [],
     "layer_presets": [],
@@ -645,13 +645,18 @@
       {
         "filename": "esp_dooropen.kicad_sch",
         "name": "esp_dooropen",
-        "uuid": "00000000-0000-0000-0000-000000000000"
+        "uuid": "bd2c1f21-b749-5f1c-a913-71e3c1292665"
       }
     ],
     "used_designators": "",
     "variants": []
   },
-  "sheets": [],
+  "sheets": [
+    [
+      "bd2c1f21-b749-5f1c-a913-71e3c1292665",
+      "esp_dooropen"
+    ]
+  ],
   "text_variables": {},
   "tuning_profiles": {
     "meta": {

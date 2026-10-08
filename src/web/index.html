@@ -23,6 +23,8 @@ h1{font-size:22px;margin:0;letter-spacing:-.02em}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
 .dot.off{background:var(--bad)}
+.dot.stale{background:var(--warn)}
+.stale #t0 .grid,.stale #hint{opacity:.45}
 .card{background:var(--card);border-radius:20px;padding:20px;box-shadow:var(--sh);margin-bottom:14px}
 .card.alert{border:2px solid var(--warn)}
 .card.alert p{margin:0 0 10px}
@@ -138,8 +140,9 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
   </div>
  </header>
 
- <div class="card alert hide" id="offline"><p style="margin:0"><b>⚠️ Keine Verbindung zum Türöffner.</b>
-  Ist das Gerät eingeschaltet und im WLAN? Es wird weiter versucht …</p></div>
+ <div class="card alert hide" id="offline"><p style="margin:0" id="offt"></p></div>
+
+ <div class="card alert hide" id="fswarn"><p style="margin:0"><b>⚠️ Speicher:</b> <span id="fst"></span></p></div>
 
  <div class="card alert hide" id="nopw">
   <p><b>⚠️ Kein Passwort gesetzt.</b> Jeder im WLAN kann die Tür öffnen und alle Einstellungen ändern.</p>
@@ -482,9 +485,14 @@ input[type=file]{width:100%;font:inherit;font-size:13px;color:var(--mut);margin-
 let audioCtx=null,soundOn=false,wasRinging=false,buzEnd=0,buzDur=1,tt,logN=-1,role=2,cur=0,cfgAt=0,gDirty=false,uDirty=false,cDirty=false,cfg={},stat={};
 const $=id=>document.getElementById(id);
 // Alle Anfragen der Seite kennzeichnen: das Geraet akzeptiert dafuer nur die
-// Sitzung, keine vom Browser gemerkte Basic-Anmeldung (sonst klappt Abmelden nicht)
+// Sitzung, keine vom Browser gemerkte Basic-Anmeldung (sonst klappt Abmelden nicht).
+// Zeitlimit (Abfragen 4 s, Aenderungen 10 s, sonst o.timeout), gilt auch fuer das Lesen
+// der Antwort - eine haengende Verbindung blockiert sonst die Anzeige.
 const _fetch=window.fetch.bind(window);
-window.fetch=(u,o={})=>{o.headers=Object.assign({'X-Tueroeffner':'1'},o.headers||{});return _fetch(u,o);};
+window.fetch=(u,o={})=>{o.headers=Object.assign({'X-Tueroeffner':'1'},o.headers||{});
+ const c=new AbortController();setTimeout(()=>c.abort(),o.timeout||(o.method=='POST'?10000:4000));
+ o.signal=c.signal;return _fetch(u,o);};
+const noAnswer=e=>e&&e.name=='AbortError'?'Keine Antwort vom Türöffner':'Keine Verbindung';
 const TABS=['tuer','einstellungen','dienste','system'];
 function tab(n){cur=n;for(let i=0;i<4;i++){$('t'+i).className=i==n?'tab show':'tab';$('tb'+i).className=i==n?'active':'';}
  try{history.replaceState(null,'',n?'#'+TABS[n]:location.pathname);}catch(e){}
@@ -507,7 +515,7 @@ $('loginf').addEventListener('submit',async e=>{
   let j={};try{j=await r.json();}catch(x){}
   if(r.ok){$('lp').value='';hideLogin();toast(j.role==2?'Als Admin angemeldet':'Angemeldet');gen++;await refresh();if(role==2)loadCfg();}
   else{$('lerr').textContent=j.err||'Anmeldung fehlgeschlagen';$('lp').select();}
- }catch(x){$('lerr').textContent='Keine Verbindung';}
+ }catch(x){$('lerr').textContent=noAnswer(x);}
  b.disabled=false;
 });
 async function logout(){
@@ -559,7 +567,7 @@ async function post(url,okMsg,ids,params){
   ok=r.ok;if(r.ok){if(ids)clean(ids);if(okMsg)toast(okMsg);}
   else if(r.status==401){showLogin(role>=1,j.err);}
   else toast(j.err||'Fehler '+r.status,true);}
- catch(e){toast('Keine Verbindung',true);}
+ catch(e){toast(noAnswer(e),true);}
  refresh();if(role==2)loadCfg();return ok;
 }
 const hm=m=>String(m/60|0).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
@@ -574,7 +582,7 @@ const EV=['🔔 Klingeln','🔔 Klingeln (Nachtruhe)','📞 Anruf ausgelöst','�
  '🔓 Geöffnet (Telegram)','🔓 Geöffnet (Tastenfeld)','🔓 Geöffnet (Karte)','⛔ Falscher Code am Tastenfeld',
  '⛔ Unbekannte Karte','🔓 Geöffnet (Apple Home)'];
 function when(e){
- if(!e.t)return'vor '+dur(e.a);
+ if(!e.t)return e.a<0?'ohne Uhrzeit':'vor '+dur(e.a);   // a<0: ohne NTP gespeichert
  const d=new Date(e.t*1000);
  return d.toDateString()==new Date().toDateString()?d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})
   :d.toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
@@ -616,10 +624,11 @@ function anim(){
  if(act)requestAnimationFrame(anim);
 }
 // Oeffnen erst nach 0,8 s gedrueckt halten (gegen versehentliches Antippen);
-// per Tastatur (Enter/Leertaste) sofort
-const HOLD_MS=800;let holdT=null;
+// per Tastatur (Enter/Leertaste) sofort. Laeuft schon ein Halten (zweiter Finger)
+// oder eine Anfrage, passiert nichts - sonst oeffnete es doppelt oder trotz Loslassen.
+const HOLD_MS=800;let holdT=null,opening=false;
 function holdStart(e){
- if(e.button>0||buzEnd>Date.now())return;
+ if(e.button>0||holdT||opening||buzEnd>Date.now())return;
  e.preventDefault();initAudio();
  const p=$('prog');p.style.transition='stroke-dashoffset '+HOLD_MS+'ms linear';p.style.strokeDashoffset=0;
  $('openh').textContent='weiter halten …';
@@ -634,8 +643,11 @@ function holdEnd(){
 // SIP-Anmeldung im Klartext
 function sipText(s){
  if(!s.sipcfg)return['kein Server','off'];
+ // Scheitert nur eine Erneuerung, gilt die Anmeldung bis zu ihrem Ablauf weiter
+ if(s.registered)return['angemeldet','on'];
  const c=s.sipst;
- if(c==200)return['angemeldet','on'];if(c==-1)return['verbinde …','off'];
+ if(c==200)return['abgelaufen','bad'];if(c==-1)return['verbinde …','off'];
+ if(c==-2)return['Server nicht gefunden (DNS)','bad'];
  if(c==0)return['Anlage antwortet nicht','bad'];
  if(c==401||c==407)return['Benutzer/Passwort falsch','bad'];
  if(c==403)return['abgelehnt (403)','bad'];if(c==404)return['Benutzer unbekannt (404)','bad'];
@@ -646,25 +658,53 @@ function callText(s){
  if(s.incall)return['eingehend …','warn'];
  return[['–','off'],['angenommen','on'],['nicht angenommen','warn'],['besetzt','warn'],['abgelehnt','warn'],['Fehler '+s.lastcode,'bad']][s.lastcall]||['–','off'];
 }
-// Live-Zustand (jede Sekunde, klein)
-let fails=0;
-async function refresh(){
+// Live-Zustand (jede Sekunde, klein). Abfragen ueberlappen nie: laeuft noch eine
+// (z.B. haengende Verbindung), wird danach einmal neu abgefragt.
+let fails=0,lastOk=0,locked=false,pollP=null,pollAgain=false;
+function refresh(){
+ if(pollP){pollAgain=true;return pollP;}
+ pollP=(async()=>{try{do{pollAgain=false;await poll();}while(pollAgain);}finally{pollP=null;}})();
+ return pollP;
+}
+function offline(msg){const t=$('offt');$('offline').classList.remove('hide');
+ if(msg)t.textContent='⚠️ '+msg;
+ else t.innerHTML='<b>⚠️ Keine Verbindung zum Türöffner.</b> Ist das Gerät eingeschaltet und im WLAN? Es wird weiter versucht …';}
+// Seit 3 s keine Antwort: Anzeige als veraltet kennzeichnen
+function staleCheck(){
+ const st=lastOk>0&&Date.now()-lastOk>3000;document.body.classList.toggle('stale',st);
+ if(st&&$('conn').className!='dot off'){$('conn').className='dot stale';$('connt').textContent='keine Antwort';}
+}
+async function poll(){
  try{
   const g=gen;
   const r=await fetch('/status');
-  fails=0;$('offline').classList.add('hide');
+  let s={};try{s=await r.json();}catch(x){if(r.ok)throw x;}
+  lastOk=Date.now();fails=0;$('offline').classList.add('hide');document.body.classList.remove('stale');
+  if(r.status==429){   // nach falschen Anmeldungen gesperrt: Anmeldung offen lassen, Wartezeit zeigen
+   locked=true;role=0;$('conn').className='dot off';$('connt').textContent='gesperrt';
+   if($('loginv').classList.contains('hide'))showLogin(false);
+   const w=r.headers.get('Retry-After');
+   $('lerr').textContent=s.err||(w?'Zu viele falsche Anmeldungen – bitte '+w+' s warten':'Gesperrt – bitte warten');
+   return;
+  }
+  if(locked){locked=false;$('lerr').textContent='';}
   if(r.status==401){   // Tuer ist geschuetzt und niemand angemeldet
    role=0;$('conn').className='dot on';$('connt').textContent='online';
    $('logout').classList.add('hide');$('login').classList.add('hide');
    if($('loginv').classList.contains('hide')||!loginNeeded)showLogin(false);
    return;
   }
-  const s=await r.json();
+  if(!r.ok){$('conn').className='dot off';$('connt').textContent='Fehler '+r.status;offline(s.err||'Fehler '+r.status);return;}
   if(g!==gen)return;   // waehrenddessen gespeichert -> Antwort ist veraltet
   if(loginNeeded)hideLogin();
   role=s.role;$('seg').classList.toggle('hide',role<2);if(role<2&&cur)tab(0);
   $('login').classList.toggle('hide',role>=2);
   $('nopw').classList.toggle('hide',!(role==2&&!s.hasweb));
+  const fsm=s.fs&2?'nicht verfügbar – Notbetrieb mit Standardwerten, Änderungen gehen beim Neustart verloren.'
+   :s.fs&8?'Gespeicherte Einstellungen waren nicht lesbar – es gelten Standardwerte. Bitte prüfen oder Sicherung einspielen.'
+   :s.fs&4?'Speichern fehlgeschlagen (voll oder defekt) – Änderungen gelten nur bis zum Neustart.'
+   :s.fs&1?'War nicht lesbar und wurde beim Start neu eingerichtet. Bei einem neuen Gerät normal – sonst Einstellungen prüfen oder Sicherung einspielen.':'';
+  $('fswarn').classList.toggle('hide',!(role==2&&fsm));$('fst').textContent=fsm;
   $('conn').className='dot on';
   $('connt').textContent='online'+(s.auth||s.hasweb?' · '+(role==2?'Admin':s.auth?'Tür':'ohne Anmeldung'):'');
   $('logout').classList.toggle('hide',!s.auth);
@@ -720,13 +760,14 @@ async function refresh(){
   $('sysheap').textContent=Math.round(s.heap/1024)+' KB (größter Block '+Math.round(s.maxblk/1024)+' KB)';
   if(cur&&Date.now()-cfgAt>30000)loadCfg();
  }catch(e){console.error(e);$('conn').className='dot off';$('connt').textContent='offline';
-  if(++fails>=3)$('offline').classList.remove('hide');}
+  if(++fails>=3)offline();}
 }
 // Einstellungen (nur Admin; beim Start, nach dem Speichern und alle 30 s im offenen Tab)
 async function loadCfg(){
  try{
   const g=gen;cfgAt=Date.now();
-  const c=await(await fetch('/config')).json();
+  const r=await fetch('/config');if(!r.ok)return;
+  const c=await r.json();
   if(g!==gen)return;cfg=c;
   setVal('pin',c.pin);
   setVal('qfrom',hm(c.qfrom));setVal('qto',hm(c.qto));
@@ -803,7 +844,12 @@ function pushForm(){const t=$('ptype').value;$('pbox').classList.toggle('hide',t
  $('pnote').textContent=t=='1'?'App „ntfy“ installieren und dasselbe Topic abonnieren. Topic schwer erratbar wählen.'
   :t=='2'?'Bot über @BotFather anlegen; Chat-ID z. B. über @userinfobot.':'';}
 function netForm(){$('nbox').classList.toggle('hide',!$('nstatic').checked);}
-function openDoor(){buzEnd=Date.now()+buzDur*1000;anim();post('/open','Tür wird geöffnet');}
+// Countdown erst, wenn das Geraet das Oeffnen bestaetigt hat (Fehler zeigt post())
+async function openDoor(){
+ if(opening)return;opening=true;$('openh').textContent='öffne …';
+ if(await post('/open','Tür wird geöffnet'))buzEnd=Date.now()+buzDur*1000;
+ opening=false;$('openh').textContent='gedrückt halten';anim();
+}
 function saveGeneral(){
  post('/setdial','Gespeichert',['dur','dial','pin','auto'],{s:$('dur').value,nr:$('dial').value,pin:$('pin').value,auto:$('auto').checked?1:0});
 }
@@ -827,14 +873,14 @@ function saveQuiet(){
 // Datei vom Geraet laden (mit Kennzeichnung) und speichern
 async function download(url,fallback){
  try{
-  const r=await fetch(url);
+  const r=await fetch(url,{timeout:15000});
   if(r.status==401){showLogin(true,'Bitte anmelden.');return;}
-  if(!r.ok){toast('Fehler '+r.status,true);return;}
+  if(!r.ok){let j={};try{j=await r.json();}catch(x){}toast(j.err||'Fehler '+r.status,true);return;}
   const cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename="([^"]+)"/);
   const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());
   a.download=m?m[1]:fallback;document.body.append(a);a.click();
   setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
- }catch(e){toast('Keine Verbindung',true);}
+ }catch(e){toast(e&&e.name=='AbortError'?'Keine Antwort vom Türöffner':'Download abgebrochen',true);}
 }
 function saveRing(){post('/setring','Gespeichert',['ringcall'],{callers:$('ringcall').value.trim()});}
 function saveRelay2(){
@@ -846,10 +892,10 @@ function saveHomekit(){
 }
 function hkReset(){if(confirm('Neuen Kopplungscode erzeugen?\nBereits gekoppelte Geräte bleiben gekoppelt. Wirkt nach einem Neustart.'))
  post('/sethomekit','Neuer Code nach Neustart',null,{on:$('hkon').checked?1:0,reset:1});}
-// Zweites Relais: ebenfalls gedrueckt halten
-let r2T=null;
-function open2(){post('/open2',(stat.r2name||'Tor')+' wird geöffnet');}
-function r2Start(e){if(e.button>0)return;e.preventDefault();const b=$('r2bar');
+// Zweites Relais: ebenfalls gedrueckt halten (gleiche Sperren wie beim Oeffnen)
+let r2T=null,r2Busy=false;
+async function open2(){if(r2Busy)return;r2Busy=true;await post('/open2',(stat.r2name||'Tor')+' wird geöffnet');r2Busy=false;}
+function r2Start(e){if(e.button>0||r2T||r2Busy)return;e.preventDefault();const b=$('r2bar');
  b.style.transition='width .8s linear';b.style.width='100%';$('r2lbl').textContent='weiter halten …';
  r2T=setTimeout(()=>{r2T=null;b.style.transition='';b.style.width='0';open2();},800);}
 function r2End(){if(!r2T)return;clearTimeout(r2T);r2T=null;const b=$('r2bar');b.style.transition='width .2s';b.style.width='0';
@@ -996,7 +1042,7 @@ for(const i of document.querySelectorAll('input[type=password]')){
  w.append(b);
 }
 if(location.hash=='#anmelden')showLogin(true);
-setInterval(refresh,1000);refresh().then(()=>{
+setInterval(()=>{staleCheck();refresh();},1000);refresh().then(()=>{
  const n=TABS.indexOf(location.hash.slice(1));
  if(n>0&&role==2)tab(n);else if(role==2)loadCfg();
 });

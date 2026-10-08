@@ -5,8 +5,8 @@
 //    "offen", solange der Summer laeuft, danach wieder "verriegelt".
 //  - Klingeln erzeugt eine Klingel-Mitteilung auf iPhone/Watch/HomePod.
 //
-// HomeSpan nutzt unser WLAN (bekommt keine eigenen Zugangsdaten) und lauscht auf
-// Port 1201. Ein-/Ausschalten wirkt erst nach einem Neustart.
+// HomeSpan nutzt unser WLAN und lauscht auf Port 1201. Ein-/Ausschalten wirkt erst
+// nach einem Neustart.
 #include "app.h"
 
 #if defined(ESP32) && defined(HOMEKIT_ENABLED)
@@ -15,6 +15,7 @@
 #include <HAP.h>
 
 static bool hkStarted = false;
+static bool hkServing = false;   // HAP-Server und mDNS (_hap) laufen
 static SpanCharacteristic *bellEvent = nullptr;
 
 // Schloss: Ziel "offen" -> Summer; Zustand folgt dem Summer
@@ -54,6 +55,8 @@ static String prettyCode(const String &c) {
 String homekitStatus() {
   if (!hkOn) return "aus";
   if (!hkStarted) return "startet nach Neustart";
+  if (!hkServing) return "wartet auf WLAN";
+  if (!netUp()) return "WLAN getrennt";
   if (HAPClient::nAdminControllers() > 0) return "gekoppelt";
   return "bereit zum Koppeln – Code " + prettyCode(hkCode);
 }
@@ -75,12 +78,19 @@ void homekitBegin() {
   }
   homeSpan.setPortNum(1201);               // Port 80 gehoert der Weboberflaeche
   homeSpan.setHostNameSuffix("");          // gleicher Name wie das Geraet: tueroeffner.local
-  homeSpan.setLogLevel(-1);                // keine eigenen seriellen Ausgaben/Befehle
+  homeSpan.setLogLevel(-1);                // keine eigenen seriellen Ausgaben
+  homeSpan.setSerialInputDisable(true);    // keine seriellen Befehle ("E" loescht den NVS,
+                                           // ohne Zeilenende haengt das Lesen)
   homeSpan.setPairingCode(hkCode.c_str());
   homeSpan.setQRID("TUER");
-  homeSpan.begin(Category::Locks, "Türöffner", HOSTNAME, "ESP SIP-Türöffner");
-  // HomeSpan schaltet das automatische Wiederverbinden ab - wir verwalten das WLAN
-  WiFi.setAutoReconnect(true);
+  // HomeSpan 2.0 startet HAP-Server und mDNS nur mit eigenen WLAN-Zugangsdaten - ohne
+  // sie waere das Geraet in Apple Home unsichtbar. Es bekommt die unseres WLANs (stehen
+  // ohnehin im NVS). homekitLoop() ruft poll() nur bei bestehender Verbindung auf, so
+  // ruft HomeSpan nicht selbst WiFi.begin() auf (hoechstens einmal mit denselben Daten,
+  // falls das WLAN genau waehrend poll() wegfaellt) - das WLAN verwalten weiter wir.
+  homeSpan.setWifiCredentials(WiFi.SSID().c_str(), WiFi.psk().c_str());
+  homeSpan.setWifiCallback([]() { hkServing = true; });   // nach hapServer->begin()
+  homeSpan.begin(Category::Locks, "Türöffner", HOSTNAME, "ESP SIP-Türöffner");   // wartet fest 2 s
 
   new SpanAccessory();
     new Service::AccessoryInformation();
@@ -97,7 +107,7 @@ void homekitBegin() {
 }
 
 void homekitLoop() {
-  if (hkStarted) homeSpan.poll();
+  if (hkStarted && netUp()) homeSpan.poll();
 }
 
 #else

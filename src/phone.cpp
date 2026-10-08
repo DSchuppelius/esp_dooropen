@@ -4,7 +4,8 @@
 #include <time.h>
 
 // SIP: Ein- und Ausgabepuffer + Client. SIP ueber UDP bleibt praktisch immer
-// unter der MTU (1500); groessere Pakete werden abgeschnitten.
+// unter der MTU (1500); groessere Pakete werden abgeschnitten (INVITE -> 513).
+// Der Eingang hat Reserve, weil die Lib Kurzformen ("i:") zu "Call-ID: " erweitert.
 static char acSipIn[1600];
 static char acSipOut[1500];
 Sip aSip(acSipOut, sizeof(acSipOut));
@@ -24,6 +25,12 @@ static bool     sipInited      = false;
 static uint32_t lastRegisterAt = 0;
 static uint8_t  regFastTries   = 0;   // schnelle Wiederholungen nach Init
 static int      lastRegStatus  = -2;
+static bool     lastRegistered = false;   // Protokoll nur bei echtem Wechsel
+
+// Klingeln waehrend eines Anrufs an den Tueroeffner: die Klingel hat Vorrang, die
+// Rufkette startet, sobald die Leitung frei ist (0 = nichts ausstehend)
+static uint32_t ringPendingAt  = 0;
+static const uint32_t RING_PENDING_MS = 20000;   // danach verwerfen
 
 // Eingehende Anrufe: Fehlversuche und Sperre
 static uint8_t  callTries   = 0;      // falsche Codes im laufenden Anruf
@@ -73,14 +80,18 @@ void initSip() {
   regFastTries   = 3;   // erster Versuch nach Boot scheitert oft am Timing
   lastRegisterAt = millis() - 3600000UL;   // sofort anmelden
   lastRegStatus  = -2;
+  lastRegistered = false;
 }
 
-// SIP-Anmeldung im Klartext (Web, Home Assistant)
+// SIP-Anmeldung im Klartext (Web, Home Assistant). Scheitert nur eine Erneuerung
+// (z.B. Paketverlust im WLAN), gilt die Anmeldung bis zu ihrem Ablauf weiter.
 const char *sipStateText() {
   if (sipServer.length() == 0) return "nicht eingerichtet";
+  if (aSip.IsRegistered()) return "angemeldet";
   switch (aSip.RegisterStatus()) {
-    case 200: return "angemeldet";
+    case 200: return "abgelaufen";
     case -1:  return "verbinde";
+    case -2:  return "Server nicht gefunden (DNS)";
     case 0:   return "Anlage antwortet nicht";
     case 401:
     case 407: return "Zugangsdaten falsch";
@@ -94,24 +105,32 @@ const char *sipStateText() {
 static void registerLoop() {
   if (!netUp() || sipServer.length() == 0 || aSip.IsRegistering()) return;
 
-  int st = aSip.RegisterStatus();
-  if (st != lastRegStatus) {
-    lastRegStatus = st;
-    if (st == 200)    logMsg("SIP: angemeldet");
-    else if (st >= 0) logMsg("SIP: Anmeldung fehlgeschlagen (%d, %s)", st, sipStateText());
+  // Protokoll nur bei echtem Wechsel: eine gescheiterte Erneuerung, waehrend die
+  // Anmeldung noch gilt, meldet nichts ("abgemeldet" erst, wenn sie ablaeuft)
+  bool reg = aSip.IsRegistered();
+  int  st  = aSip.RegisterStatus();
+  if (reg != lastRegistered) {
+    lastRegistered = reg;
+    if (reg) logMsg("SIP: angemeldet");
+    else     logMsg("SIP: abgemeldet (%d, %s)", st, sipStateText());
+    mqttStateDue = true;
+  } else if (!reg && st != lastRegStatus && st != -1) {
+    logMsg("SIP: Anmeldung fehlgeschlagen (%d, %s)", st, sipStateText());
     mqttStateDue = true;
   }
+  lastRegStatus = st;
 
   uint32_t interval;
-  if (aSip.IsRegistered()) {
+  if (reg && st == 200) {
     int exp = aSip.RegisterExpires();   // der Registrar darf kuerzen
     if (exp <= 0 || exp > SIP_REG_EXPIRES) exp = SIP_REG_EXPIRES;
     interval = (uint32_t)(exp > 60 ? exp - 30 : exp / 2) * 1000UL;
   } else {
+    // nicht angemeldet oder letzte Erneuerung gescheitert: bald erneut
     interval = regFastTries ? 1000UL : (uint32_t)SIP_REG_RETRY_SEC * 1000UL;
   }
   if (millis() - lastRegisterAt < interval) return;
-  if (!aSip.IsRegistered() && regFastTries) regFastTries--;
+  if (!reg && regFastTries) regFastTries--;
   lastRegisterAt = millis();
   aSip.StartRegister(SIP_REG_EXPIRES);
 }
@@ -133,24 +152,49 @@ static bool dialIndex(uint8_t idx) {
   return true;
 }
 
-// Rufkette von vorne starten
+// Rufkette von vorne starten. Laeuft gerade ein Anruf an den Tueroeffner (Code-
+// Eingabe), hat die Klingel Vorrang: Anruf beenden, die Kette startet in
+// chainLoop(), sobald die Leitung frei ist (true). Laeuft schon ein eigener
+// Anruf (Rufkette), bleibt es dabei (false).
 bool startChain() {
+  String nr;
+  if (aSip.IsIncoming() && dialTarget(dialList, 0, nr)) {
+    logMsg("SIP: es klingelt - eingehender Anruf beendet, Rufkette folgt");
+    aSip.Hangup();
+    aSip.SetAcceptIncoming(false);   // bis dahin keinen neuen Anruf annehmen
+    ringPendingAt = millis() | 1;    // 0 = nichts ausstehend
+    return true;
+  }
   if (aSip.IsBusy() || !dialIndex(0)) return false;
+  ringPendingAt = 0;
   chainIdx = 0;
   return true;
 }
 
 void stopChain() {
-  chainIdx = -1;
+  chainIdx      = -1;
+  ringPendingAt = 0;
 }
 
 // Nach jedem Anruf: angenommen -> fertig, sonst (nach kurzer Pause) naechste Nummer
 static void chainLoop() {
   static uint32_t idleSince = 0;
+  // Ausstehendes Klingeln: starten, sobald frei (BYE des Anrufs bestaetigt)
+  if (ringPendingAt) {
+    if (millis() - ringPendingAt > RING_PENDING_MS) {
+      ringPendingAt = 0;
+      logMsg("SIP: Rufkette nach Klingeln verworfen (Leitung nicht frei)");
+    } else if (!aSip.IsBusy() && !aSip.IsClosing()) {
+      ringPendingAt = 0;
+      if (dialIndex(0)) chainIdx = 0;
+    }
+    return;
+  }
   if (chainIdx < 0 || aSip.IsBusy()) { idleSince = 0; return; }
   if (aSip.LastCallResult() == Sip::CALL_ANSWERED) { stopChain(); return; }
   if (!idleSince) idleSince = millis();
-  if (millis() - idleSince < 1000) return;   // Anlage den vorigen Anruf abschliessen lassen
+  // Anlage den vorigen Anruf abschliessen lassen (CANCEL/BYE bestaetigt, max. ~6 s)
+  if (millis() - idleSince < 1000 || aSip.IsClosing()) return;
   idleSince = 0;
   String nr;
   if (!dialTarget(dialList, chainIdx + 1, nr)) {   // Ende der Kette, niemand hat abgenommen
@@ -284,10 +328,14 @@ static void incomingDigit(char d) {
 // Ziffern vom Telefon. Ausgehender Anruf (Bewohner hat abgehoben): ohne Code
 // oeffnet '*', mit Code die richtige Ziffernfolge.
 static void handleDtmf() {
-  char d = aSip.ReadDtmf();
+  bool fromIncoming = false;
+  char d = aSip.ReadDtmf(&fromIncoming);
   if (!d) return;
   Serial.println(F("DTMF empfangen"));   // Ziffer nicht ausgeben (Code)
-  if (aSip.IsIncoming()) { incomingDigit(d); return; }
+  // Herkunft wie beim Empfang gemerkt, nicht IsIncoming(): legt die Lib im selben
+  // Durchlauf auf, waere die Taste des Anrufers sonst die eines Bewohners ('*')
+  if (fromIncoming) { incomingDigit(d); return; }
+  if (!aSip.IsBusy()) return;   // kein eigener Anruf (mehr)
   if (dtmfPin.length() == 0) {
     if (d == '*') openByPhone(EV_OPEN_PHONE, "");
     return;
@@ -318,7 +366,7 @@ void phoneLoop() {
   static uint32_t lastCheck = 0;
   if (millis() - lastCheck > 1000) {
     lastCheck = millis();
-    aSip.SetAcceptIncoming(incomingReady());
+    aSip.SetAcceptIncoming(incomingReady() && !ringPendingAt);
   }
   if (aSip.RingCall()) triggerRing(String("Anruf ") + aSip.RingCaller());
   if (aSip.NewIncoming()) {

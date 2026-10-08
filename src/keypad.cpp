@@ -106,6 +106,10 @@ void keypadLoop() {
   if (!wgOn) { wgCount = 0; keyBuf = ""; return; }
   // Unvollstaendige Eingabe nach 10 s verwerfen
   if (keyBuf.length() && millis() - keyAt > 10000) keyBuf = "";
+  // Abgelaufene Sperre und Fehlversuche auch ohne neue Eingabe vergessen (sonst
+  // gaelten sie nach dem millis-Ueberlauf nach 49,7 Tagen wieder)
+  isLocked();
+  if (wrongCount && !locked && millis() - firstWrongAt > (uint32_t)KEYPAD_LOCK_MIN * 60000UL) wrongCount = 0;
   if (!wgCount || micros() - wgLastUs < 25000) return;
 
   noInterrupts();

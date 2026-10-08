@@ -22,7 +22,12 @@ Präprozessor-Weiche automatisch an.
   - **`*` am Telefon** (DTMF per RFC 4733 oder SIP INFO) öffnet die Tür und legt auf –
     oder ein **Öffnen-Code** (z. B. `1234`), dann bleibt das Gespräch 30 s offen,
   - wird nicht abgehoben, wird der Anruf nach 15 s per `CANCEL` zurückgezogen,
-  - **SIP-Status im Klartext** und Ergebnis des letzten Anrufs.
+  - **SIP-Status im Klartext** und Ergebnis des letzten Anrufs,
+  - **robust im WLAN**: `INVITE` (auch mit Digest), `CANCEL`, `BYE` und `REGISTER`
+    werden bei Paketverlust wiederholt (RFC 3261); eine gescheiterte Erneuerung
+    meldet erst „abgemeldet“, wenn die Anmeldung wirklich abläuft. Kopfzeilen in
+    jeder Schreibweise und Kurzform (`i:`, `f:` …) werden verstanden; ein Server als
+    Hostname wird einmal je Anmeldung aufgelöst (folgt auch einem DHCP-Wechsel).
 - **Klingeln per Anruf**: Eine TK-Anlage (z. B. OpenCom) ruft beim Klingeln den
   Türöffner an – er nimmt nicht ab und wertet das als Klingeln. Ganz ohne Verdrahtung.
 - **Anrufe an den Türöffner** (optional): Wer die Nebenstelle des Türöffners anruft,
@@ -58,7 +63,14 @@ Präprozessor-Weiche automatisch an.
 - **Nachtruhe**: in einem Zeitfenster beim Klingeln nicht anrufen.
 - **Praxis-Modus**: an gewählten Wochentagen in **zwei Zeitfenstern** öffnet Klingeln
   die Tür automatisch (ohne Anruf); **gesetzliche Feiertage je Bundesland** werden
-  automatisch berücksichtigt, weitere **Ausnahmetage** (Urlaub) einstellbar.
+  automatisch berücksichtigt, weitere **Ausnahmetage** (Urlaub) einstellbar. Bei
+  Fenstern über Mitternacht (z. B. 22–2 Uhr) gehört der Teil nach Mitternacht zum
+  Vortag (Wochentag, Feier- und Ausnahmetag des Vortags).
+- **Uhrzeit** per NTP: `pool.ntp.org`, ersatzweise das **Gateway** (Router oder
+  TK-Anlage, z. B. FRITZ!Box „Zeitserver im Heimnetz bereitstellen“) und
+  `de.pool.ntp.org`. So laufen Praxis-Modus, Nachtruhe und Zeitfenster auch ohne
+  Internet, wenn der Router NTP anbietet. Ohne gültige Uhrzeit sind Praxis-Modus und
+  Nachtruhe aus.
 - **Türkontakt** (Reed): Tür offen/zu im Web und in Home Assistant, Meldung, wenn die
   Tür zu lange offen steht, und Prüfung, ob nach dem Summer wirklich jemand
   hereinkam („Tür nach Summer geöffnet“ / „Summer, Tür blieb zu“).
@@ -66,19 +78,31 @@ Präprozessor-Weiche automatisch an.
   (Klingeln, Öffnen, Tür zu lange offen, Sperre nach falschen Codes).
 - **Syslog**: Meldungen und Ereignisse an einen Syslog-Server (Fehlersuche aus der Ferne).
 - **Ethernet** statt WLAN mit dem WT32-ETH01 (z. B. per PoE versorgt).
-- **Selbstheilung**: Neustart, wenn das Netzwerk 10 min weg ist, der Speicher knapp oder
-  zerstückelt ist oder das Programm hängt (Watchdog auf beiden Boards); der Grund des
-  letzten Starts wird angezeigt.
+- **Selbstheilung**: Ist das WLAN weg, verbindet der ESP jede Minute neu; als letzte
+  Stufe Neustart nach 30 min. Ethernet: Neustart nur, wenn ein Link da ist, aber
+  10 min keine IP kommt (bei gezogenem Kabel nicht). Außerdem Neustart, wenn der
+  Speicher knapp oder zerstückelt ist oder das Programm hängt (Watchdog auf beiden
+  Boards); der Grund des letzten Starts wird angezeigt.
 - **Neue IP per DHCP** wird erkannt, SIP meldet sich dann sofort neu an.
 - **Sicherung**: alle Einstellungen als Datei herunterladen und wieder einspielen.
-- **Feste IP-Adresse** wahlweise statt DHCP.
+- **Feste IP-Adresse** wahlweise statt DHCP (vor dem Speichern geprüft: Maske,
+  Gateway im selben Netz, keine Netz-/Broadcast-Adresse – gegen Aussperren).
 - **Sperre gegen Sturmklingeln**: Klingeln innerhalb von 5 s löst keinen neuen
   Anruf aus.
-- **WiFiManager**: Fehlt das WLAN, öffnet der ESP das passwortgeschützte WLAN
-  `Tueroeffner-Setup` zum Eintragen der Zugangsdaten – **ohne zu blockieren**: Klingel,
-  Taster und Summer funktionieren währenddessen weiter.
+- **WiFiManager**: Ohne gespeicherte Zugangsdaten öffnet der ESP das
+  passwortgeschützte WLAN `Tueroeffner-Setup` zum Eintragen – **ohne zu blockieren**:
+  Klingel, Taster und Summer funktionieren währenddessen weiter. Ist das bekannte WLAN
+  nur weg (z. B. startet der Router nach einem Stromausfall langsamer als der ESP),
+  verbindet er weiter und öffnet die Einrichtung erst nach 15 min ohne Verbindung –
+  dann für 5 min, während die Verbindung zum WLAN weiter versucht wird.
 - Einstellungen, Zähler und Verlauf liegen im **LittleFS** (Zähler/Verlauf werden
-  höchstens alle 5 min geschrieben, um den Flash zu schonen).
+  höchstens alle 5 min geschrieben, der lange Verlauf gebündelt höchstens einmal pro
+  Minute, um den Flash zu schonen; vor Neustart und Update wird alles gesichert).
+  Gespeichert wird geprüft über eine Hilfsdatei – bei vollem oder defektem Speicher
+  bleibt die alte Datei, die Oberfläche meldet den Fehler. Für die Einstellungen bleibt
+  immer Platz frei (notfalls wird der ältere Verlauf gelöscht). Wurde der Speicher beim
+  Start formatiert oder ist er nicht verfügbar, zeigt die Oberfläche eine Warnung.
+  Ereignisse ohne Uhrzeit (kein NTP) bleiben erhalten und erscheinen als „ohne Uhrzeit“.
 
 ## Verdrahtung
 
@@ -120,6 +144,13 @@ Das OLED ist auf dem HW-364A **fest verdrahtet** an D5/D6.
 
 Tastenfeld/RFID (Wiegand) gibt es auf dem ESP8266 nicht – dafür sind keine Pins frei.
 
+**Summer-Taster an D3 (GPIO0):** GPIO0 entscheidet beim Start, ob der ESP8266 normal
+startet oder auf eine neue Firmware wartet. Ist der Taster beim Einschalten **oder bei
+einem Neustart** (Update, Selbstheilung, Watchdog) gedrückt – oder klemmt er bzw. ist
+die Leitung feucht –, bleibt der ESP im Flash-Modus hängen, bis er stromlos war. Die
+Firmware kann das nicht abfangen. Für Dauerbetrieb daher ESP32 bzw. die Steuerplatine
+nutzen oder den Taster so montieren, dass er nicht klemmen kann.
+
 ### WT32-ETH01 (Ethernet)
 
 Umgebung `wt32-eth01`. Netzwerk über das eingebaute LAN8720 (kein WLAN, keine
@@ -134,9 +165,30 @@ reine Eingänge **ohne** internen Pull-up.
 | Summer-Taster        | IO12  | gegen GND (Strapping-Pin: nie auf 3,3 V ziehen) |
 | Türkontakt           | IO2   | gegen GND                                     |
 | Status-LED           | IO17  | LED mit 330 Ω gegen GND                        |
-| Relais 2             | IO5   |                                               |
+| Relais 2             | IO5   | Strapping-Pin, siehe Relais beim Start        |
 | Wiegand D0 / D1      | IO35 / IO36 | Pull-up bzw. Pegelwandler nötig         |
 | OLED SDA / SCL       | IO15 / IO14 | optional                                |
+
+### Relais beim Start
+
+Die Firmware setzt die Relais als allererstes in Ruhelage. Davor – während Reset,
+Bootloader und Programmstart (einige 100 ms) – bestimmt die Hardware den Pegel:
+
+| Board | Relais 2 | Pegel beim Start | Risiko |
+| --- | --- | --- | --- |
+| ESP32 DevKit / [Steuerplatine](hardware/README.md) | GPIO13 | kein Pull-up | keins (Platine: 100 kΩ hält das Gate auf GND) |
+| WT32-ETH01 | IO5 | interner **Pull-up** (Strapping-Pin) | active-high-Modul kann kurz anziehen |
+| ESP8266 | D0 (GPIO16) | beim Start **HIGH** | active-high-Modul kann kurz anziehen |
+
+Relais 1 (Summer: GPIO26, IO4, D1/GPIO5) ist davon nicht betroffen. Hängt an Relais 2
+etwas, das schon ein kurzer Impuls auslöst (Tor, Garage):
+
+- **WT32-ETH01:** einen **Pull-down von 4,7–10 kΩ** vom Relais-Eingang (IN/S) nach GND
+  einbauen – stärker als der interne Pull-up; IO5 darf beim Start LOW sein (betrifft
+  nur das SDIO-Timing).
+- **WT32-ETH01 und ESP8266:** ein Relais-Modul nehmen, das bei **LOW** schaltet, und in
+  [src/config.h](src/config.h) `RELAY2_ACTIVE_LOW` auf `true` setzen – der HIGH-Pegel
+  beim Start bedeutet dann „aus“.
 
 ### Tastenfeld / RFID-Leser (Wiegand)
 
@@ -186,6 +238,13 @@ Der Klingel-Eingang (ESP32: **GPIO27**, ESP8266: **D2**) arbeitet mit internem P
 **aktiv = gegen GND gezogen**. Erkannt werden sowohl Dauersignale als auch mit 50 Hz
 pulsierende Signale (Optokoppler an Wechselspannung) – das Signal gilt als aktiv,
 solange es in den letzten 40 ms aktiv war (`SIGNAL_AC_HOLD_MS`).
+
+Gegen Störungen: Das Signal allein braucht mindestens 3 aktive Abtastungen
+(`SIGNAL_MIN_SAMPLES`), und solange der Summer an ist sowie 300 ms danach zählt
+Klingeln nicht (`RING_BUZZER_GUARD_MS`, Einkopplung vom Türöffner). Ein Eingang, der
+schon beim Start aktiv ist (klemmender Taster, Feuchte), zählt erst, nachdem er einmal
+frei war – das gilt auch für den Summer-Taster. Hängt das Programm kurz (Netzwerk,
+Flash), erkennt ein Interrupt Tastendrücke ab 50 ms trotzdem und holt sie nach.
 
 Welche Variante passt?
 
@@ -368,8 +427,9 @@ erhalten.
 ### Update von Version 1.3
 
 - Die Einstellungen wandern beim ersten Start automatisch aus dem EEPROM ins
-  **LittleFS** – nichts weiter zu tun. Ein Zurück auf 1.3 nutzt wieder den alten
-  (unveränderten) EEPROM-Stand.
+  **LittleFS** – nichts weiter zu tun. Danach wird der alte EEPROM-Stand stillgelegt
+  (er wird nie wieder geladen, auch nicht nach einem Formatieren des LittleFS); ein
+  Zurück auf 1.3 beginnt deshalb mit Standardwerten.
 - **OTA aus PlatformIO funktioniert nur noch mit Admin-Passwort.** In
   [platformio.ini](platformio.ini) bei `upload_flags = --auth=PASSWORT` das
   Admin-Passwort eintragen. Ohne Passwort: einmal per Browser-Upload aktualisieren.
@@ -438,7 +498,8 @@ Wechselt ein Passwort, werden die Anmeldungen der betroffenen Rolle beendet.
 - **Öffnen**: den Knopf **0,8 s gedrückt halten** (der Ring füllt sich) – kurzes
   Antippen öffnet nicht (Schutz vor versehentlichem Öffnen, z. B. in der Tasche).
   Mit der Tastatur (Enter/Leertaste) öffnet er sofort. Öffnen beendet auch einen
-  gerade laufenden Anruf.
+  gerade laufenden Anruf. Der Countdown startet erst, wenn das Gerät das Öffnen
+  bestätigt hat; ein Fehler wird angezeigt.
 - **Verlauf**: zeigt die neuesten 5 Einträge, aufklappbar; Filter *Klingeln*,
   *Öffnungen*, *Anrufe*.
 - Beim Klingeln: Hinweis auf der Seite, Titel des Browser-Tabs „🔔 Es klingelt“,
@@ -446,7 +507,8 @@ Wechselt ein Passwort, werden die Anmeldungen der betroffenen Rolle beendet.
 - Passwortfelder lassen sich per Auge-Symbol im Klartext anzeigen.
 - Der geöffnete Tab steht in der Adresse (`#einstellungen`, `#system`, …) und
   bleibt beim Neuladen erhalten.
-- Antwortet das Gerät nicht mehr, erscheint ein deutlicher Hinweis.
+- Antwortet das Gerät nicht mehr, erscheint ein deutlicher Hinweis (nach 3 s ohne
+  Antwort gilt die Anzeige als veraltet; Anfragen brechen nach 4 s ab).
 - Auf dem Handy über „Zum Startbildschirm hinzufügen“ wie eine App nutzbar.
 
 ### HTTP-API
@@ -516,13 +578,19 @@ Werkzeuge können statt der Anmeldeseite **Basic-Auth** verwenden, z. B.:
   angenommen, DTMF-Töne per RTP nur von der Gegenstelle des Gesprächs oder der Anlage.
 - **Home Assistant**: „Tür öffnen“ reagiert nur auf `PRESS`/`OPEN`/`UNLOCK`; Befehle
   direkt nach dem Verbinden und gespeicherte (*retained*) Befehle werden ignoriert
-  bzw. gelöscht – eine versehentlich gespeicherte Nachricht öffnet also nicht bei
-  jedem Neustart die Tür.
+  bzw. gelöscht (noch vor dem Abonnieren) – eine versehentlich gespeicherte Nachricht
+  öffnet also nicht bei jedem Neustart die Tür.
+- **Telegram**: Ein „Öffnen“-Knopf gilt nur kurz und nur bis zum nächsten Neustart;
+  Nachrichten, die vor dem Start eingingen, werden verworfen.
 - **OTA** aus PlatformIO nur mit Admin-Passwort; das WLAN-Einrichtungsportal bietet
   keinen Firmware-Upload an.
-- **Notfall-Reset:** Klingel-Taster beim Einschalten 5 s gedrückt halten – dann sind
+- **Notfall-Reset:** Klingel-Taster beim Einschalten (oder nach der Reset-Taste)
+  5 s gedrückt halten, bis „Jetzt loslassen“ erscheint, und **loslassen** – dann sind
   beide Passwörter gelöscht und das Gerät nutzt wieder DHCP statt einer festen IP.
-  Den Klingel-Taster deshalb **nicht von außen zugänglich** montieren.
+  Nach einem Neustart per Software oder Watchdog wirkt der Taster nicht, ein
+  dauerhaft gedrückter (klemmender) Taster löst nie aus. Der Reset steht im Verlauf
+  („Gerät gestartet – Notfall-Reset“) und wird per Push gemeldet. Den Klingel-Taster
+  trotzdem **nicht von außen zugänglich** montieren.
 
 ## Anrufe an den Türöffner und Gästecodes
 
@@ -537,6 +605,8 @@ Ton und wartet 30 s auf einen Code:
 `*` oder `#` löscht die Eingabe. Nach 3 falschen Codes legt der ESP auf; nach 6 falschen
 Codes innerhalb von 15 min werden Anrufe 15 min lang abgelehnt (mit Push-Meldung).
 Ohne Öffnen-Code und ohne gültigen Gästecode werden keine Anrufe angenommen.
+Klingelt es während eines solchen Anrufs, hat die Klingel Vorrang: der Anruf wird
+beendet und die Rufkette startet, sobald die Leitung frei ist.
 
 ## Klingeln per Anruf (TK-Anlage)
 
@@ -570,6 +640,12 @@ Unter **Dienste → Push-Mitteilungen**:
   sind möglich.
 - **Telegram**: Bot über `@BotFather` anlegen, Bot-Token und Chat-ID eintragen.
 
+Auf dem ESP8266 hat jede Mitteilung ein festes Zeitbudget von 5 s (Namensauflösung
+höchstens 2 s). Ist der Server nicht auflösbar oder für HTTPS zu wenig Speicher frei
+(BearSSL braucht 16 KB am Stück), wird sie übersprungen und das im Log vermerkt. Bis zu
+3 Mitteilungen warten; ist die Warteschlange voll, fällt die älteste weg (ebenfalls im
+Log, auf dem ESP32 bei mehr als 4 wartenden).
+
 Zusätzlich wählbar: **„Melden, wenn nach dem Summer niemand hereinkam“** (braucht den
 Türkontakt).
 
@@ -583,7 +659,9 @@ Ist Telegram eingestellt, beantwortet der Türöffner auch Nachrichten:
 | `/oeffnen`   | Rückfrage mit Knopf **„Jetzt öffnen“**                |
 
 Mit **„Öffnen per Telegram erlauben“** bekommen Klingel-Mitteilungen einen Knopf
-**„🔓 Öffnen“**. Ein Knopf gilt 3 Minuten – alte Mitteilungen öffnen später nicht mehr.
+**„🔓 Öffnen“**. Ein Knopf gilt 3 Minuten und nur bis zum nächsten Neustart – alte
+Mitteilungen öffnen später nicht mehr. Nachrichten, die vor dem Start eingingen,
+verwirft der Bot.
 Nur die eingetragene Chat-ID und die **weiteren erlaubten Chat-IDs** dürfen den Bot
 benutzen; ein fremder Chat bekommt seine Chat-ID angezeigt (zum Freischalten). Der Bot
 fragt per Long-Polling bei Telegram nach – keine Portfreigabe nötig. Auf dem ESP8266
@@ -591,8 +669,8 @@ nicht verfügbar (zu wenig Speicher für die dauernde TLS-Verbindung).
 
 Wählbar sind Meldungen bei Klingeln, Öffnen und „Tür zu lange offen“; die Sperre nach
 falschen Codes wird immer gemeldet. Auf dem ESP32 laufen sie in einem eigenen Task und
-prüfen das Server-Zertifikat. Auf dem ESP8266 werden sie vor dem Anruf gesendet
-(verzögert den Anruf um 1–2 s), nicht während der Summer läuft, und ohne
+prüfen das Server-Zertifikat. Auf dem ESP8266 werden sie erst nach dem Anruf bzw. der
+Rufkette gesendet (der Anruf hat Vorrang), nicht während der Summer läuft, und ohne
 Zertifikatsprüfung.
 
 ## Syslog
@@ -614,6 +692,11 @@ Türöffner** und den angezeigten Kopplungscode eingeben.
 
 HomeSpan nutzt das WLAN des Türöffners und den Port 1201; `tueroeffner.local` und die
 Weboberfläche bleiben unverändert. Ein- und Ausschalten wirkt nach einem Neustart.
+HomeSpan 2.0 bekommt dazu die WLAN-Zugangsdaten des Türöffners (ohne sie startet es
+den HomeKit-Dienst nicht), baut die Verbindung aber nicht selbst auf – das WLAN
+verwaltet weiter der Türöffner. Serielle HomeSpan-Befehle sind abgeschaltet. Der Status in der
+Weboberfläche zeigt, ob der Dienst wirklich läuft („wartet auf WLAN“, „bereit zum
+Koppeln“, „gekoppelt“). Beim Start wartet HomeSpan einmalig 2 s (fest in der Bibliothek).
 
 ## Home Assistant
 
@@ -647,7 +730,9 @@ Jedes Ereignis wird zusätzlich auf `tueroeffner/<id>/event` veröffentlicht (JS
 `type`, `event`, `detail`) – praktisch für eigene Automationen.
 
 Fällt der ESP aus, werden alle Entitäten als *nicht verfügbar* angezeigt.
-Nach einem Neustart von Home Assistant meldet sich der ESP automatisch neu an.
+Nach einem Neustart von Home Assistant meldet sich der ESP automatisch neu an. Ist der
+Broker nicht erreichbar, versucht er es in wachsenden Abständen erneut (bis 5 min);
+ein Broker-Name (auch `.local`) wird aufgelöst, ohne die Klingel zu blockieren.
 
 Beispiel-Automation (Push mit Öffnen-Knopf):
 
@@ -692,7 +777,9 @@ Grundeinstellungen in [src/config.h](src/config.h), u. a.:
 | `RING_NOTIFY_MS`         | 10000           | Anzeigedauer „Es klingelt!“                        |
 | `RING_COOLDOWN_MS`       | 5000            | Sperre gegen Sturmklingeln                         |
 | `SIP_PIN_CALL_SECONDS`   | 30              | Gesprächsdauer mit Öffnen-Code                     |
-| `WIFI_LOST_RESTART_MIN`  | 10              | Neustart, wenn das WLAN so lange weg ist           |
+| `WIFI_LOST_RESTART_MIN`  | 30              | Neustart, wenn das WLAN so lange weg ist           |
+| `WIFI_RETRY_SEC`         | 60              | WLAN weg: so oft neu verbinden (s)                 |
+| `ETH_NO_IP_RESTART_MIN`  | 10              | Ethernet: Neustart, wenn Link ohne IP so lange     |
 | `LOOP_WATCHDOG_SEC`      | 60              | Watchdog, falls das Programm hängt                 |
 | `HOSTNAME`               | `tueroeffner`   | Name im Netz (`http://tueroeffner.local`)          |
 | `TIME_ZONE`              | MEZ/MESZ        | Zeitzone für Verlauf und Nachtruhe                 |
@@ -700,11 +787,15 @@ Grundeinstellungen in [src/config.h](src/config.h), u. a.:
 | `MQTT_DISCOVERY_PREFIX`  | `homeassistant` | Discovery-Prefix von Home Assistant                |
 | `WIFI_AP_PASSWORD`       | `tuer-einrichten` | Standard-Passwort der WLAN-Einrichtung           |
 | `WIFI_PORTAL_SECONDS`    | 300             | so lange bleibt die WLAN-Einrichtung offen         |
+| `WIFI_PORTAL_AFTER_MIN`  | 15              | WLAN-Einrichtung erst nach so langer WLAN-Störung  |
 | `INCOMING_CALL_SECONDS`  | 30              | Dauer eines Anrufs an den Türöffner                |
 | `INCOMING_LOCK_FAILS`    | 6               | falsche Codes bis zur Sperre (`INCOMING_LOCK_MIN`) |
 | `AUTH_MAX_FAILS`         | 5               | falsche Anmeldungen bis zur Sperre                 |
 | `LOG_SIZE`               | 30              | Einträge im (kurzen) Verlauf                       |
-| `EVENT_FILE_MAX`         | 48000           | Größe einer Datei des langen Verlaufs (Bytes, 2 Dateien) |
+| `EVENT_FILE_MAX`         | 48000 / 24000   | Größe einer Datei des langen Verlaufs (Bytes, 2 Dateien; ESP32 24000) |
+| `FS_RESERVE_BYTES`       | 24576           | im LittleFS immer frei für Einstellungen (Bytes)   |
+| `EVENT_FLUSH_MS`         | 60000           | langen Verlauf höchstens so oft schreiben (ms)     |
+| `WEB_SEND_MAX_MS`        | 5000            | Startseite/CSV höchstens so lange senden (ms)      |
 | `DOOR_PASS_WINDOW_SEC`   | 10              | so lange nach dem Summer muss die Tür aufgehen     |
 | `USERS_MAX`              | 8               | weitere Benutzer                                   |
 | `KEYPAD_LOCK_FAILS`      | 5               | Fehlversuche am Tastenfeld bis zur Sperre (`KEYPAD_LOCK_MIN`) |
@@ -732,6 +823,8 @@ einkommentieren – dann werden sie seriell ausgegeben.
 | [src/homekit.cpp](src/homekit.cpp) | Apple Home (HomeSpan) |
 | [src/net.cpp](src/net.cpp) | Netzwerk-Abstraktion WLAN / Ethernet |
 | [src/holidays.h](src/holidays.h) | gesetzliche Feiertage je Bundesland |
+| [src/timewin.h](src/timewin.h) | Zeitfenster (auch über Mitternacht) |
+| [src/presswatch.h](src/presswatch.h) | verpasste Tastendrücke per Interrupt nachholen |
 | [src/mqtt.cpp](src/mqtt.cpp) | Home Assistant |
 | [src/web.cpp](src/web.cpp) | HTTP-API, Anmeldung, Schutzmechanismen |
 | [src/web/index.html](src/web/index.html) | Weboberfläche |
@@ -745,8 +838,10 @@ automatisch.
 ## Tests und CI
 
 - **Host-Tests** ([tests/host](tests/host)): SIP-Bibliothek (Digest nach RFC 2617,
-  REGISTER, ausgehende/eingehende Anrufe, Klingel-Anrufe, DTMF, 20 000 Zufallspakete)
-  und Feiertagsberechnung – übersetzt mit AddressSanitizer/UBSan:
+  REGISTER, ausgehende/eingehende Anrufe, Klingel-Anrufe, DTMF, Wiederholungen bei
+  Paketverlust, Kurzformen/Schreibweisen, Re-INVITE, 20 000 Zufallspakete)
+  sowie Feiertagsberechnung, Zeitfenster über Mitternacht und das Nachholen verpasster
+  Tastendrücke – übersetzt mit AddressSanitizer/UBSan:
 
   ```bash
   bash tests/host/run.sh      # Linux oder WSL, braucht g++

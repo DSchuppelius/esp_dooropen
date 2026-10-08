@@ -22,14 +22,30 @@ String bootReason;
 bool   portalActive = false;          // Einrichtungs-WLAN offen?
 String myIpStr;                       // eigene IP (fuer SIP)
 
-static WiFiManager wm;
+// WiFiManager schaltet beim Oeffnen des Portals eine nicht verbundene Station ab
+// (_disableSTAConn; in 2.0.17 ohne Setter, aber protected). Beim spaeten Portal
+// soll sie weiter verbinden -> kleine Unterklasse.
+class DoorWiFiManager : public WiFiManager {
+ public:
+  void keepStation(bool keep) { _disableSTAConn = !keep; }
+};
+
+static DoorWiFiManager wm;
 static bool     servicesUp    = false;   // Webserver, SIP, MQTT ... gestartet?
 static bool     otaOn         = false;
 static uint32_t restartAt     = 0;       // geplanter Neustart (nach der HTTP-Antwort)
 static uint8_t  restartReason = 0;
 static bool     wifiResetDue  = false;
-static uint32_t wifiLostAt    = 0;
+static uint32_t netDownAt     = 0;       // seit wann ohne Verbindung (millis, 0 = verbunden)
 static uint32_t wifiSavedAt   = 0;       // Zugangsdaten im Portal gespeichert (millis)
+static uint32_t wifiRetryAt   = 0;       // letzter eigener Verbindungsversuch (millis)
+static bool     wifiCreds     = false;   // WLAN-Zugangsdaten gespeichert? (je Versuch aktualisiert)
+static bool     portalTried   = false;   // spaetes Einrichtungs-WLAN in dieser Offline-Phase schon offen
+static bool     pwResetDone   = false;   // Notfall-Reset beim Start -> Mitteilung, sobald das Netz steht
+#if defined(USE_ETHERNET)
+static bool     ethStarted    = false;   // Ethernet-Treiber gestartet?
+static uint32_t ethStuckAt    = 0;       // seit wann Link, aber keine IP (millis)
+#endif
 
 #if !defined(ESP32)
 static Ticker            loopWdt;     // Loop-Watchdog (ESP32: Task-Watchdog)
@@ -170,6 +186,27 @@ static void configModeCallback(WiFiManager *) {
   showPortalInfo(ip.c_str());
 }
 
+// Uhrzeit per NTP (laeuft im Hintergrund; bis dahin ist timeValid() false). Ohne
+// Internet hilft das Gateway (Router/TK-Anlage bieten oft NTP an), dazu ein zweiter
+// Pool-Server. sntp merkt sich nur Zeiger -> statische Puffer, beim Wechsel
+// abwechselnd (der alte bleibt gueltig, bis sntp umgestellt ist).
+static void startNtp() {
+  static char    gwBuf[2][16];
+  static uint8_t gwIdx = 0;
+  const char *gw = nullptr;
+  IPAddress g = netGateway();
+  if ((uint32_t)g != 0) {
+    gwIdx ^= 1;
+    strlcpy(gwBuf[gwIdx], g.toString().c_str(), sizeof(gwBuf[gwIdx]));
+    gw = gwBuf[gwIdx];
+  }
+#if defined(ESP32)
+  configTzTime(TIME_ZONE, NTP_SERVER, gw, NTP_SERVER2);
+#else
+  configTime(TIME_ZONE, NTP_SERVER, gw, NTP_SERVER2);
+#endif
+}
+
 // Einmalig, sobald das WLAN steht (und das Einrichtungsportal zu ist)
 static void startServices() {
   myIpStr = netIP().toString();
@@ -183,12 +220,7 @@ static void startServices() {
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
 #endif
 
-  // Uhrzeit per NTP (laeuft im Hintergrund; bis dahin ist timeValid() false)
-#if defined(ESP32)
-  configTzTime(TIME_ZONE, NTP_SERVER);
-#else
-  configTime(TIME_ZONE, NTP_SERVER);
-#endif
+  startNtp();
 
   // Name im Netz: http://tueroeffner.local
   if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
@@ -224,13 +256,78 @@ static void startServices() {
   homekitBegin();   // Apple Home (falls eingeschaltet)
   servicesUp = true;
   logMsg("Tueroeffner " FW_VERSION " bereit (%s)", bootReason.c_str());
+  if (pwResetDone) {
+    pwResetDone = false;
+    queuePush(0, F("Notfall-Reset am Gerät: Passwörter gelöscht, DHCP aktiv"));
+  }
 }
 
 // Zugangsdaten wurden im Portal gespeichert (WiFiManager-Rueckruf)
 static void wifiSavedCallback() {
   wifiSavedAt = millis() | 1;
+  wifiCreds   = true;
   logMsg("WLAN-Zugangsdaten gespeichert - verbinde");
 }
+
+#if !defined(USE_ETHERNET)
+// Station mit den gespeicherten Zugangsdaten neu verbinden
+static void staReconnect() {
+  logMsg("WLAN: neuer Verbindungsversuch");
+#if defined(ESP32)
+  WiFi.disconnect();               // trennt eine halbe Verbindung (verbunden ohne IP)
+#else
+  WiFi.disconnect(false, false);   // ESP8266: WiFi.disconnect() loescht die Zugangsdaten!
+#endif
+  WiFi.begin();
+  wifiRetryAt = millis();
+}
+
+// Portal zu (Zeit abgelaufen, "Exit" oder verbunden): Station sicher wieder starten.
+// WiFiManager verbindet am Ende nur bei WL_IDLE_STATUS neu, Core 3.x meldet dann
+// aber WL_DISCONNECTED - die Station bliebe sonst bis zur Selbstheilung untaetig.
+static void portalClosed() {
+  WiFi.setAutoReconnect(true);
+  if (servicesUp) server.begin();   // eigene Weboberflaeche wieder auf Port 80
+  displayDirty = true;              // Hinweis zur Einrichtung vom Display nehmen
+  wifiCreds = wm.getWiFiIsSaved();
+  if (!netUp() && wifiCreds) staReconnect();
+}
+
+// Bekanntes WLAN zu lange weg: Einrichtungs-WLAN oeffnen (z.B. neues Router-Passwort).
+// Die Station bleibt an (AP+STA); neu verbunden wird nur im Minutentakt
+// (wifiKeepTrying) - staendige Suchlaeufe machten das Einrichtungs-WLAN unbrauchbar.
+static void openLatePortal() {
+  logMsg("WLAN seit %u min weg - Einrichtungs-WLAN wird geoeffnet", (unsigned)WIFI_PORTAL_AFTER_MIN);
+  if (servicesUp) server.stop();    // Port 80 gehoert solange dem Portal
+  WiFi.setAutoReconnect(false);
+  wm.keepStation(true);
+  wm.setConfigPortalTimeout(WIFI_PORTAL_SECONDS);
+  wm.startConfigPortal(WIFI_AP_NAME, apPw.length() ? apPw.c_str() : nullptr);
+  portalActive = wm.getConfigPortalActive();
+  if (!portalActive) {                // Start fehlgeschlagen
+    WiFi.setAutoReconnect(true);
+    if (servicesUp) server.begin();
+  }
+}
+
+// WLAN weg: nach WIFI_RETRY_SEC und dann im selben Takt neu verbinden. Der Core 3.x
+// verbindet bei manchen Trennungsgruenden nicht selbst neu (u.a. 202 AUTH_FAIL, wenn
+// der Router nach einem Stromausfall noch startet). Nicht, solange das Portal
+// gerade neue Zugangsdaten verbindet (wifiSavedAt).
+static void wifiKeepTrying() {
+  uint32_t now = millis();
+  if (wifiSavedAt || now - netDownAt < (uint32_t)WIFI_RETRY_SEC * 1000UL ||
+      now - wifiRetryAt < (uint32_t)WIFI_RETRY_SEC * 1000UL) return;
+  wifiRetryAt = now;
+  wifiCreds   = wm.getWiFiIsSaved();
+  if (!wifiCreds) return;              // Ersteinrichtung: das Portal ist schon offen
+  if (!portalActive && !portalTried && now - netDownAt >= (uint32_t)WIFI_PORTAL_AFTER_MIN * 60000UL) {
+    portalTried = true;
+    openLatePortal();
+  }
+  staReconnect();
+}
+#endif
 
 // Verbindung ueberwachen: Dienste starten, bei neuer IP SIP neu anmelden
 static void netLoop() {
@@ -238,17 +335,28 @@ static void netLoop() {
   portalActive = false;
   bool connected = netUp();
 #else
+  bool wasPortal = portalActive;
   portalActive = wm.getConfigPortalActive();
   bool connected = netUp();
+  if (wasPortal && !portalActive) portalClosed();   // Zeit abgelaufen oder "Exit"
 #endif
+  if (connected) {
+    netDownAt   = 0;
+    portalTried = false;
+  } else if (!netDownAt) {
+    netDownAt = millis() | 1;
+  }
 
+#if !defined(USE_ETHERNET)
   // Verbunden, aber Portal noch offen (z.B. erster Versuch nach dem Speichern
   // scheiterte, die automatische Wiederverbindung klappte dann doch) -> schliessen
   if (portalActive && connected) {
     logMsg("WLAN verbunden - Einrichtung wird beendet");
     wm.stopConfigPortal();
     portalActive = false;
+    portalClosed();
   }
+#endif
   // Gespeichert, aber keine Verbindung: der Verbindungsaufbau beim Start ist
   // zuverlaessiger als aus dem laufenden Portal heraus -> neu starten
   if (wifiSavedAt && !connected && millis() - wifiSavedAt > 45000UL) {
@@ -256,6 +364,9 @@ static void netLoop() {
     restartNow(RR_NETWORK);
   }
   if (connected) wifiSavedAt = 0;
+#if !defined(USE_ETHERNET)
+  if (!connected) wifiKeepTrying();
+#endif
 
   if (portalActive || !connected) return;
   if (!servicesUp) {
@@ -268,21 +379,35 @@ static void netLoop() {
     myIpStr = ip;
     initSip();
     syslogBegin();
+    startNtp();                // Gateway (Zeitserver) kann sich geaendert haben
     mqttDiscoveryDue = true;   // configuration_url aktualisieren
   }
 }
 
-// Selbstheilung: WLAN zu lange weg oder Speicher knapp -> Neustart
+// Selbstheilung: Netzwerk zu lange weg oder Speicher knapp -> Neustart
 static void selfHeal() {
-  if (!netUp() && !portalActive) {
-    if (!wifiLostAt) wifiLostAt = millis();
-    else if (millis() - wifiLostAt > (uint32_t)WIFI_LOST_RESTART_MIN * 60000UL) {
-      logMsg("Selbstheilung: Netzwerk zu lange weg -> Neustart");
-      restartNow(RR_WIFI_LOST);
-    }
-  } else {
-    wifiLostAt = 0;
+#if defined(USE_ETHERNET)
+  // Nur, wenn ein Link da ist, aber keine IP kommt (oder der Treiber nicht startete).
+  // Bei gezogenem Kabel hilft kein Neustart (und Relais 2 an IO5 koennte zucken).
+  if (netUp() || (ethStarted && !ETH.linkUp())) {
+    ethStuckAt = 0;
+  } else if (!ethStuckAt) {
+    ethStuckAt = millis() | 1;
+  } else if (millis() - ethStuckAt > (uint32_t)ETH_NO_IP_RESTART_MIN * 60000UL) {
+    logMsg("Selbstheilung: Ethernet ohne IP-Adresse -> Neustart");
+    restartNow(RR_WIFI_LOST);
   }
+#else
+  // Letzte Stufe nach den Verbindungsversuchen und dem Einrichtungs-WLAN. Ist das
+  // Portal offen, erst nach der doppelten Zeit (vielleicht traegt gerade jemand das
+  // WLAN ein) - ohne gespeicherte Zugangsdaten (Ersteinrichtung) gar nicht.
+  uint32_t limit = (uint32_t)WIFI_LOST_RESTART_MIN * 60000UL;
+  uint32_t down  = netDownAt ? millis() - netDownAt : 0;
+  if (down > limit && (!portalActive || (down > 2 * limit && wifiCreds))) {
+    logMsg("Selbstheilung: Netzwerk zu lange weg -> Neustart");
+    restartNow(RR_WIFI_LOST);
+  }
+#endif
   if ((ESP.getFreeHeap() < MIN_FREE_HEAP || maxFreeBlock() < MIN_FREE_BLOCK) &&
       !aSip.IsBusy() && !buzzerActive) {
     logMsg("Selbstheilung: Speicher knapp (%u frei, Block %u) -> Neustart",
@@ -295,6 +420,10 @@ static void selfHeal() {
 //  Setup / Loop
 // ------------------------------------------------------------
 void setup() {
+  // Als Erstes die Relais in Ruhelage (vor Serial und delay): Relais 2 liegt beim
+  // WT32 auf IO5 (Strapping-Pin, Pull-up beim Reset), beim ESP8266 auf GPIO16 -
+  // bis hier kann es kurz anziehen (Abhilfe siehe README "Relais beim Start")
+  doorBegin();
 #if defined(DOOR_ON_RX_PIN)
   Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);   // RX wird zum Tuerkontakt
 #else
@@ -304,31 +433,36 @@ void setup() {
   bootReason = describeBootReason();
   Serial.printf("Start: %s\n", bootReason.c_str());
 
-  doorBegin();       // Relais sofort in Ruhelage
   settingsBegin();
   displayBegin();
-  checkEmergencyReset();
   pushBegin();
   keypadBegin();
   logEvent(EV_BOOT, bootReason);
+  pwResetDone = checkEmergencyReset();   // Mitteilung folgt, sobald das Netz steht
 
 #if defined(USE_ETHERNET)
   // Ethernet (WT32-ETH01): kein WLAN, keine Einrichtung per Portal
   WiFi.mode(WIFI_OFF);
   ETH.setHostname(HOSTNAME);
-  ETH.begin(ETH_PHY_LAN8720, ETH_PHY_ADDR_CFG, ETH_PHY_MDC_PIN, ETH_PHY_MDIO_PIN,
-            ETH_PHY_POWER_PIN, ETH_CLK_MODE_CFG);
+  ethStarted = ETH.begin(ETH_PHY_LAN8720, ETH_PHY_ADDR_CFG, ETH_PHY_MDC_PIN, ETH_PHY_MDIO_PIN,
+                         ETH_PHY_POWER_PIN, ETH_CLK_MODE_CFG);
   if (staticIp) ETH.config(ipAddr, ipGw, ipMask, ipDns);
-  logMsg("Ethernet gestartet - warte auf Verbindung");
+  if (ethStarted) logMsg("Ethernet gestartet - warte auf Verbindung");
+  else            logMsg("Ethernet startet nicht - Neustart in %d min", ETH_NO_IP_RESTART_MIN);
 #else
   // WLAN: bekanntes Netz versuchen; sonst Einrichtungsportal, das NICHT blockiert -
   // Klingel, Taster und Summer funktionieren waehrenddessen weiter.
   WiFi.mode(WIFI_STA);
+  wifiCreds = wm.getWiFiIsSaved();
   wm.setHostname(HOSTNAME);
   wm.setAPCallback(configModeCallback);
   wm.setSaveConfigCallback(wifiSavedCallback);
   wm.setConfigPortalBlocking(false);
-  wm.setConfigPortalTimeout(wm.getWiFiIsSaved() ? WIFI_PORTAL_SECONDS : 0);
+  wm.setConfigPortalTimeout(wifiCreds ? WIFI_PORTAL_SECONDS : 0);
+  // Mit gespeicherten Zugangsdaten kein Portal beim Start: nach einem Stromausfall
+  // startet der Router oft langsamer als der ESP, und das Portal schaltet die
+  // Station ab. netLoop verbindet weiter und oeffnet es erst spaet.
+  wm.setEnableConfigPortal(!wifiCreds);
   wm.setConnectTimeout(20);
   // Im Portal nur WLAN-Auswahl anbieten (kein Firmware-Upload ohne Anmeldung)
   std::vector<const char *> menu = { "wifi", "exit" };
@@ -336,8 +470,10 @@ void setup() {
   wm.setShowInfoUpdate(false);
   wm.setShowInfoErase(false);
   if (staticIp) wm.setSTAStaticIPConfig(ipAddr, ipGw, ipMask, ipDns);
-  if (!wm.autoConnect(WIFI_AP_NAME, apPw.length() ? apPw.c_str() : nullptr))
-    logMsg("WLAN nicht verbunden - Einrichtung laeuft im Hintergrund");
+  if (!wm.autoConnect(WIFI_AP_NAME, apPw.length() ? apPw.c_str() : nullptr)) {
+    if (wifiCreds) logMsg("WLAN nicht verbunden - neuer Versuch im Hintergrund");
+    else           logMsg("WLAN nicht verbunden - Einrichtung laeuft im Hintergrund");
+  }
 #endif
 
 #if defined(ESP32)

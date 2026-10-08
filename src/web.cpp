@@ -10,6 +10,8 @@
 #include "app.h"
 #if defined(ESP32)
   #include <Update.h>
+  #include <lwip/sockets.h>
+  #include <errno.h>
 #else
   #include <Updater.h>
 #endif
@@ -97,11 +99,11 @@ struct WebSession {
   char     name[25];    // angemeldeter Benutzer (fuer Verlauf und Pruefung)
   bool     keep;        // angemeldet bleiben
   uint32_t created;     // Unix-Zeit (0 = unbekannt)
-  uint32_t lastUsed;    // millis()
+  uint32_t lastUsed;    // uptimeSeconds() - laeuft anders als millis() nicht nach 49 Tagen ueber
 };
 static WebSession sessions[8];
 static const char    *SESSION_FILE    = "/sessions.txt";
-static const uint32_t SESSION_IDLE_MS = 12UL * 3600UL * 1000UL;
+static const uint32_t SESSION_IDLE_S  = 12UL * 3600UL;
 static const uint32_t SESSION_KEEP_S  = 30UL * 86400UL;
 
 static bool   loggedIn = false;   // letzte Anfrage mit gueltiger Anmeldung?
@@ -115,22 +117,36 @@ static uint32_t randomWord() {
 #endif
 }
 
-static bool sessionValid(const WebSession &s) {
+static bool sessionValid(WebSession &s) {
   if (!s.token[0]) return false;
-  if (s.keep) return !(timeValid() && s.created && (uint32_t)time(nullptr) - s.created > SESSION_KEEP_S);
-  return millis() - s.lastUsed < SESSION_IDLE_MS;
+  if (s.keep) {
+    if (!timeValid()) return true;
+    uint32_t now = (uint32_t)time(nullptr);
+    if (!s.created) s.created = now;   // vor dem Zeitabgleich angelegt: Frist laeuft ab jetzt
+    return now - s.created <= SESSION_KEEP_S;
+  }
+  return uptimeSeconds() - s.lastUsed < SESSION_IDLE_S;
 }
 
 static void sessionsSave() {
   File f = LittleFS.open(SESSION_FILE, "w");
   if (!f) return;
-  for (const WebSession &s : sessions)
+  for (WebSession &s : sessions)
     if (s.keep && sessionValid(s))
       f.printf("%s %u %lu %s\n", s.token, s.role, (unsigned long)s.created, urlEncodeField(s.name).c_str());
   f.close();
 }
 
+// Abgelaufene Sitzungen loeschen
+static void sessionsPurge() {
+  bool kept = false;
+  for (WebSession &s : sessions)
+    if (s.token[0] && !sessionValid(s)) { kept |= s.keep; memset(&s, 0, sizeof(s)); }
+  if (kept) sessionsSave();
+}
+
 static void sessionsLoad() {
+  if (!LittleFS.exists(SESSION_FILE)) return;   // ESP32 meldet sonst einen Fehler
   File f = LittleFS.open(SESSION_FILE, "r");
   if (!f) return;
   for (WebSession &s : sessions) {
@@ -148,7 +164,7 @@ static void sessionsLoad() {
     s.role     = (uint8_t)role;
     s.keep     = true;
     s.created  = created;
-    s.lastUsed = millis();
+    s.lastUsed = uptimeSeconds();
   }
   f.close();
 }
@@ -167,8 +183,9 @@ static WebSession *sessionFind() {
   if (p < 0 || (p > 0 && c[p - 1] != ' ' && c[p - 1] != ';')) return nullptr;
   String tok = c.substring(p + 4, p + 4 + 32);
   if (tok.length() != 32) return nullptr;
+  sessionsPurge();
   for (WebSession &s : sessions)
-    if (sessionValid(s) && tok == s.token) return &s;
+    if (s.token[0] && tok == s.token) return &s;
   return nullptr;
 }
 
@@ -179,17 +196,20 @@ static void setSessionCookie(const char *token, bool keep) {
 }
 
 static void sessionCreate(uint8_t role, bool keep, const String &name) {
-  WebSession *slot = &sessions[0];
+  sessionsPurge();
+  WebSession *slot = nullptr;
+  uint32_t now = uptimeSeconds(), idle = 0;
   for (WebSession &s : sessions) {
-    if (!sessionValid(s)) { slot = &s; break; }
-    if (s.lastUsed < slot->lastUsed) slot = &s;   // sonst die am laengsten unbenutzte ersetzen
+    if (!s.token[0]) { slot = &s; break; }
+    // sonst die am laengsten unbenutzte ersetzen
+    if (!slot || now - s.lastUsed > idle) { slot = &s; idle = now - s.lastUsed; }
   }
   for (int i = 0; i < 4; i++) snprintf(slot->token + i * 8, 9, "%08lx", (unsigned long)randomWord());
   slot->role     = role;
   strlcpy(slot->name, name.c_str(), sizeof(slot->name));
   slot->keep     = keep;
   slot->created  = timeValid() ? (uint32_t)time(nullptr) : 0;
-  slot->lastUsed = millis();
+  slot->lastUsed = now;
   if (keep) sessionsSave();
   setSessionCookie(slot->token, keep);
 }
@@ -225,7 +245,7 @@ static uint8_t currentRole() {
   if (webPw.length() == 0) return ROLE_ADMIN;   // kein Schutz eingerichtet
   WebSession *s = sessionFind();
   if (s && accountActive(s->name, s->role)) {
-    s->lastUsed = millis();
+    s->lastUsed = uptimeSeconds();
     loggedIn    = true;
     currentUser = s->name;
     return s->role;
@@ -287,6 +307,62 @@ void sendErr(int code, const String &msg) {
   server.send(code, "application/json", "{\"ok\":false,\"err\":\"" + jsonEsc(msg) + "\"}");
 }
 
+// Antwort nach saveSettings(): ging das Schreiben schief, gilt die Aenderung nur bis
+// zum Neustart - das soll die Oberflaeche sagen statt "Gespeichert"
+static void replySaved(bool ok) {
+  if (ok) sendOk();
+  else sendErr(500, F("Übernommen, aber nicht dauerhaft gespeichert (Speicher voll oder defekt) – gilt nur bis zum Neustart"));
+}
+
+// Antwortdaten selbst senden, hoechstens bis deadline (millis). Die Loop steht solange;
+// liest die Gegenstelle nicht mehr (Handy gesperrt, WLAN weg), wartet write() lange
+// (ESP32: bis 10 x 1 s je Aufruf) - in der Zeit keine Klingel, kein SIP.
+// false = abgebrochen (Verbindung weg, Gegenstelle liest nicht, Frist um).
+bool webSend(const uint8_t *data, size_t len, uint32_t deadline, bool progmem) {
+#if defined(ESP32)
+  (void)progmem;   // Flash ist beim ESP32 direkt lesbar
+  int fd = server.client().fd();
+  while (len) {
+    int32_t left = (int32_t)(deadline - millis());
+    if (fd < 0 || left <= 0) return false;
+    // kurz auf Platz im Sendepuffer warten, dann ohne Blockieren senden
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(fd, &set);
+    struct timeval tv;
+    tv.tv_sec  = 0;
+    tv.tv_usec = (left < 50 ? left : 50) * 1000L;
+    int r = select(fd + 1, nullptr, &set, nullptr, &tv);
+    if (r < 0) return false;
+    if (r == 0) continue;
+    r = send(fd, data, len, MSG_DONTWAIT);
+    if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    if (r > 0) { data += r; len -= r; }
+  }
+  return true;
+#else
+  // ESP8266: write() wartet hoechstens setTimeout() lang ohne Fortschritt
+  WiFiClient &c = server.client();
+  uint8_t buf[256];
+  while (len) {
+    int32_t left = (int32_t)(deadline - millis());
+    if (left <= 0 || !c.connected()) return false;
+    size_t n = len < 1024 ? len : 1024;
+    const uint8_t *p = data;
+    if (progmem) {   // aus dem Flash nur ueber memcpy_P lesen
+      if (n > sizeof(buf)) n = sizeof(buf);
+      memcpy_P(buf, data, n);
+      p = buf;
+    }
+    c.setTimeout(left);
+    if (c.write(p, n) != n) return false;
+    data += n;
+    len  -= n;
+  }
+  return true;
+#endif
+}
+
 // Zugang pruefen; liefert die Rolle oder ROLE_NONE (Antwort ist dann schon gesendet)
 static uint8_t gate(uint8_t needed) {
   if (!hostAllowed()) { sendErr(403, F("Aufruf nur über IP-Adresse oder " HOSTNAME ".local")); return ROLE_NONE; }
@@ -335,17 +411,17 @@ bool argInt(const char *key, long lo, long hi, long &out) {
   return true;
 }
 
-bool argIp(const char *key, IPAddress &out) {
-  IPAddress ip;
-  if (!server.hasArg(key) || !ip.fromString(server.arg(key))) return false;
-  out = ip;
-  return true;
-}
-
 static String argTrim(const char *key) {
   String s = server.arg(key);
   s.trim();
   return s;
+}
+
+bool argIp(const char *key, IPAddress &out) {
+  IPAddress ip;
+  if (!server.hasArg(key) || !ip.fromString(argTrim(key))) return false;
+  out = ip;
+  return true;
 }
 
 // ------------------------------------------------------------
@@ -400,7 +476,13 @@ void handleRoot() {
   if (!hostAllowed()) { sendErr(403, F("Aufruf nur über IP-Adresse oder " HOSTNAME ".local")); return; }
   server.sendHeader("Content-Encoding", "gzip");
   server.sendHeader("Cache-Control", "no-cache");
-  server.send_P(200, "text/html; charset=utf-8", (PGM_P)INDEX_HTML_GZ, INDEX_HTML_GZ_LEN);
+  // Kopf ueber den Server, die ~20 KB selbst mit Frist (siehe webSend)
+  server.setContentLength(INDEX_HTML_GZ_LEN);
+  server.send(200, "text/html; charset=utf-8", "");
+  if (!webSend(INDEX_HTML_GZ, INDEX_HTML_GZ_LEN, millis() + WEB_SEND_MAX_MS, true)) {
+    logMsg("Web: Startseite abgebrochen (Gegenstelle liest nicht oder zu langsam)");
+    server.client().stop();
+  }
 }
 
 // Live-Zustand (jede Sekunde abgefragt -> klein halten)
@@ -454,6 +536,7 @@ void handleStatus() {
   json += jBool(F("doorpass"), doorOn);
   const char *hol = holidayToday();
   json += jStr(F("holiday"),   hol ? hol : "");
+  json += jNum(F("fs"),        fsStatus());   // Speicherprobleme (FS_* in app.h)
   if (role == ROLE_ADMIN) {
     json += jStr(F("lastcaller"), aSip.LastCaller());
     json += jStr(F("wglast"),     keypadLastCard());
@@ -562,7 +645,8 @@ void handleConfig() {
   server.send(200, "application/json", json);
 }
 
-// Ereignisprotokoll, neuestes zuerst. t = Unix-Zeit (0 = unbekannt), a = Alter in s, d = Detail
+// Ereignisprotokoll, neuestes zuerst. t = Unix-Zeit (0 = unbekannt), a = Alter in s
+// (-1 = unbekannt: ohne Uhrzeit gesichert, vor einem Neustart), d = Detail
 void handleLog() {
   NEED_USER;
   bool   synced = timeValid();
@@ -572,8 +656,9 @@ void handleLog() {
   json = "{\"ev\":[";
   for (uint8_t i = 0; i < logCount; i++) {
     const LogEntry &e = eventLog[(logHead + LOG_SIZE - 1 - i) % LOG_SIZE];
-    uint32_t t   = e.t ? e.t : (synced ? (uint32_t)(now - (millis() - e.at) / 1000) : 0);
-    uint32_t age = e.t && synced ? (uint32_t)(now - e.t) : (millis() - e.at) / 1000;
+    uint32_t t   = logEntryTime(e);
+    long     age = e.t == LOG_T_UNKNOWN ? -1
+                 : e.t && synced ? (long)(now - e.t) : (long)((millis() - e.at) / 1000);
     if (i) json += ",";
     json += "{\"e\":" + String(e.type) + ",\"t\":" + String(t) + ",\"a\":" + String(age);
     if (e.detail[0]) json += ",\"d\":\"" + jsonEsc(e.detail) + "\"";
@@ -622,10 +707,10 @@ void handleSetDuration() {
   long v;
   if (!argInt("s", MIN_BUZZER_SECONDS, MAX_BUZZER_SECONDS, v)) { sendErr(400, F("Summer-Dauer ungueltig")); return; }
   buzzerSeconds = (uint8_t)v;
-  saveSettings();
+  bool saved = saveSettings();
   displayDirty = true;
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 // Rufkette, Code, Anruf-Schalter und Summer-Dauer.
@@ -649,10 +734,10 @@ void handleSetDial() {
   if (server.hasArg("auto")) callOnRing = server.arg("auto") == "1";
   buzzerSeconds = (uint8_t)dur;
   applyCallSeconds();
-  saveSettings();
+  bool saved = saveSettings();
   displayDirty = true;
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 void handleSetSip() {
@@ -670,9 +755,9 @@ void handleSetSip() {
   sipUser   = usr;
   sipPort   = (uint16_t)p;
   if (pw.length() > 0) sipPw = pw;   // Passwort nur uebernehmen, wenn ein neues angegeben wurde
-  saveSettings();
+  bool saved = saveSettings();
   initSip();   // mit neuen Daten neu registrieren (laeuft nebenher)
-  sendOk();
+  replySaved(saved);
 }
 
 void handleSetMqtt() {
@@ -690,9 +775,9 @@ void handleSetMqtt() {
   mqttUser   = usr;
   mqttPort   = (uint16_t)p;
   if (pw.length() > 0) mqttPw = pw;
-  saveSettings();
+  bool saved = saveSettings();
   initMqtt();   // Verbindung mit neuen Daten aufbauen (in mqttLoop)
-  sendOk();
+  replySaved(saved);
 }
 
 void handleSetSyslog() {
@@ -700,10 +785,10 @@ void handleSetSyslog() {
   String s = argTrim("server");
   if (s.length() > 40) { sendErr(400, F("Name zu lang (max. 40 Zeichen)")); return; }
   syslogServer = s;
-  saveSettings();
+  bool saved = saveSettings();
   syslogBegin();
   logMsg("Syslog aktiv (Firmware " FW_VERSION ")");
-  sendOk();
+  replySaved(saved);
 }
 
 void handleSetQuiet() {
@@ -716,9 +801,9 @@ void handleSetQuiet() {
   quietOn   = server.arg("on") == "1";
   quietFrom = (uint16_t)from;
   quietTo   = (uint16_t)to;
-  saveSettings();
+  bool saved = saveSettings();
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 static bool holidays_known(const String &h);
@@ -751,9 +836,9 @@ void handleSetPraxis() {
   praxisTo2   = (uint16_t)to2;
   praxisFree  = freeDays;
   praxisHoliday = holiday;
-  saveSettings();
+  bool saved = saveSettings();
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 void handleSetDoor() {
@@ -765,10 +850,10 @@ void handleSetDoor() {
   doorInvert   = server.arg("inv") == "1";
   doorAlertMin = (uint16_t)alert;
   doorAlerted  = false;
-  saveSettings();
+  bool saved = saveSettings();
   if (wasOn != doorOn) mqttDiscoveryDue = true;   // Tuer-Entitaeten anlegen/entfernen
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 // Eingehende Anrufe ein/aus und Gaestecodes
@@ -781,9 +866,9 @@ void handleSetIncoming() {
   }
   if (server.hasArg("on")) incomingOn = server.arg("on") == "1";
   guestCodes = g;
-  saveSettings();
+  bool saved = saveSettings();
   mqttStateDue = true;
-  sendOk();
+  replySaved(saved);
 }
 
 // Bundesland-Kuerzel fuer Feiertage bekannt?
@@ -798,8 +883,7 @@ void handleSetRing() {
   String c = argTrim("callers");
   if (c != "*" && !dialListValid(c)) { sendErr(400, F("Rufnummern ungültig (je max. 20 Zeichen)")); return; }
   ringCallers = c;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 // Zweites Relais
@@ -817,10 +901,10 @@ void handleSetRelay2() {
   relay2Name  = name;
   relay2Seconds = (uint8_t)dur;
   if (!relay2On && relay2Active) stopRelay2();
-  saveSettings();
+  bool saved = saveSettings();
   mqttDiscoveryDue = true;   // Knopf in Home Assistant anlegen/entfernen/umbenennen
   (void)was;
-  sendOk();
+  replySaved(saved);
 }
 
 // Weitere Benutzer. Kommt fuer einen bestehenden Namen ein leeres Passwort,
@@ -856,8 +940,7 @@ void handleSetUsers() {
     return;
   }
   users = out;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 // Telegram-Bot: Oeffnen per Knopf erlauben, weitere Chats
@@ -867,8 +950,7 @@ void handleSetTelegram() {
   if (chats.length() > 100) { sendErr(400, F("Chat-IDs zu lang")); return; }
   tgOpen  = server.arg("open") == "1";
   tgChats = chats;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 // Tastenfeld / RFID
@@ -878,8 +960,7 @@ void handleSetKeypad() {
   if (!cardsValid(cards)) { sendErr(400, F("Kartenliste ungültig (Nummer:Name, max. 25)")); return; }
   wgOn    = server.arg("on") == "1";
   wgCards = cards;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 // Apple Home: Ein/Aus wirkt nach Neustart; "reset=1" erzeugt neuen Code
@@ -889,7 +970,7 @@ void handleSetHomekit() {
   bool changed = on != hkOn;
   hkOn = on;
   if (server.arg("reset") == "1") hkCode = "";
-  saveSettings();
+  if (!saveSettings()) { replySaved(false); return; }
   server.send(200, "application/json", String("{\"ok\":true,\"restart\":") + (changed ? "true" : "false") + "}");
 }
 
@@ -916,8 +997,7 @@ void handleSetPush() {
   // Token nur uebernehmen, wenn ein neues angegeben wurde
   if (server.arg("token").length() > 0) pushToken = server.arg("token");
   lastPushCode = 0;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 void handleTestPush() {
@@ -944,12 +1024,12 @@ void handleSetWeb() {
     webUser = u;
     webPw   = p;
   }
-  saveSettings();
+  bool saved = saveSettings();
   sessionsClear(ROLE_NONE);   // alte Sitzungen gelten nicht mehr
   // Wer das Passwort gerade gesetzt hat, bleibt angemeldet
   if (webPw.length()) sessionCreate(ROLE_ADMIN, false, webUser);
   // ArduinoOTA uebernimmt das Passwort nur beim Start -> gilt dort nach Neustart
-  sendOk();
+  replySaved(saved);
 }
 
 // Tuer-Zugang (Bedien-Zugang) setzen oder entfernen (off=1)
@@ -969,9 +1049,9 @@ void handleSetOp() {
     opUser = u;
     opPw   = p;
   }
-  saveSettings();
+  bool saved = saveSettings();
   sessionsClear(ROLE_USER);   // Tuer-Sitzungen mit altem Passwort beenden
-  sendOk();
+  replySaved(saved);
 }
 
 // Passwort des Einrichtungs-WLANs (leer = offen)
@@ -980,8 +1060,7 @@ void handleSetAp() {
   String p = server.arg("pw");
   if (!apPwValid(p)) { sendErr(400, F("Mindestens 8, höchstens 32 Zeichen")); return; }
   apPw = p;
-  saveSettings();
-  sendOk();
+  replySaved(saveSettings());
 }
 
 void handleSetNet() {
@@ -993,11 +1072,16 @@ void handleSetNet() {
       sendErr(400, F("IP, Subnetzmaske oder Gateway ungueltig"));
       return;
     }
-    if (!argIp("dns", dns)) dns = gw;
+    if (argTrim("dns").length() == 0) dns = gw;
+    else if (!argIp("dns", dns)) { sendErr(400, F("DNS-Server ungültig")); return; }
+    // Passt alles zusammen? Sonst waere das Geraet nach dem Neustart nicht erreichbar
+    FStr e = staticIpError(ip, mask, gw, dns);
+    if (e) { sendErr(400, e); return; }
     ipAddr = ip; ipMask = mask; ipGw = gw; ipDns = dns;
   }
   staticIp = st;
-  saveSettings();
+  // Nicht gespeichert -> kein Neustart (die Aenderung waere danach weg)
+  if (!saveSettings()) { replySaved(false); return; }
   sendOk();
   scheduleRestart(RR_NETWORK);
 }
@@ -1038,6 +1122,8 @@ void handleRestore() {
   if (!restoreFromArgs(server, skipped)) { sendErr(400, F("Keine gültigen Einstellungen in der Sicherung")); return; }
   if (skipped.length()) logMsg("Sicherung: ungueltige Felder uebersprungen: %s", skipped.c_str());
   sessionsClear(ROLE_NONE);   // Passwoerter koennen sich geaendert haben
+  // Nicht gespeichert -> kein Neustart (die Sicherung waere danach weg)
+  if (fsStatus() & FS_SAVE_ERR) { replySaved(false); return; }
   server.send(200, "application/json", "{\"ok\":true,\"skipped\":\"" + jsonEsc(skipped) + "\"}");
   scheduleRestart(RR_RESTORE);
 }
@@ -1050,7 +1136,14 @@ void handleUpdateUpload() {
   if (up.status == UPLOAD_FILE_START) {
     updateAuthOk = hostAllowed() && !lockRemaining(clientIp()) &&
                    currentRole() == ROLE_ADMIN && sameOrigin();
-    if (!updateAuthOk) return;
+    if (!updateAuthOk) {
+      // Nicht berechtigt: gleich antworten und die Verbindung trennen - sonst liest der
+      // Server die ganze Datei (beliebig gross/langsam), und die Loop stuende so lange
+      logMsg("Update abgelehnt (%s)", IPAddress(clientIp()).toString().c_str());
+      if (gate(ROLE_ADMIN)) sendErr(403, F("Update abgelehnt"));
+      server.client().stop();
+      return;
+    }
     logMsg("Update: %s", up.filename.c_str());
     stopBuzzer();
     stopChain();
@@ -1073,7 +1166,9 @@ void handleUpdateUpload() {
 }
 
 void handleUpdateDone() {
-  if (!updateAuthOk) {
+  bool authOk = updateAuthOk;
+  updateAuthOk = false;   // gilt nur fuer diesen Upload
+  if (!authOk) {
     // gate() sendet die passende Fehlermeldung (z.B. Anmeldung erforderlich)
     if (gate(ROLE_ADMIN)) sendErr(403, F("Update abgelehnt"));
     return;

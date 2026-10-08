@@ -74,12 +74,19 @@ extern String   hkCode;                      // HomeKit-Kopplungscode (8 Ziffern
 extern uint32_t signalCount, buzzerTriggers, callCount;
 
 void   settingsBegin();          // Dateisystem, Laden bzw. Uebernahme aus dem EEPROM
-void   saveSettings();
-void   saveState();              // Zaehler + Protokoll
+bool   saveSettings();           // false = nicht dauerhaft gespeichert (Speicher voll/defekt)
+void   saveState();              // Zaehler + Protokoll (+ langer Verlauf)
 void   stateChanged();           // -> spaeter speichern
 void   settingsLoop();
 String settingsJson();           // Sicherung
 bool   restoreFromArgs(WEB_SERVER_CLASS &srv, String &err);
+// Zustand des Dateisystems (Bits; Weboberflaeche "fs", Protokoll)
+static const uint8_t FS_FORMATTED = 1, FS_FAILED = 2, FS_SAVE_ERR = 4, FS_DAMAGED = 8;
+uint8_t fsStatus();
+void    fsReport();              // Probleme melden (seriell, Syslog)
+// Feste IP pruefen (passt alles zusammen?): nullptr = in Ordnung, sonst Fehlertext
+const __FlashStringHelper *staticIpError(const IPAddress &ip, const IPAddress &mask,
+                                         const IPAddress &gw, const IPAddress &dns);
 
 // Pruefungen (auch fuer die Weboberflaeche)
 bool   pinValid(const String &p);
@@ -112,15 +119,17 @@ enum EventType : uint8_t {
 };
 struct LogEntry {
   uint32_t  at;          // millis()
-  uint32_t  t;           // Unix-Zeit, 0 = Uhr war noch nicht gestellt
+  uint32_t  t;           // Unix-Zeit, 0 = Uhr war noch nicht gestellt, LOG_T_UNKNOWN = unbekannt
   EventType type;
   char      detail[17];  // z.B. Name des Gaestecodes, Nummer des Anrufers
 };
+static const uint32_t LOG_T_UNKNOWN = 1;   // ohne Uhrzeit gesichert (vor einem Neustart)
 extern LogEntry eventLog[LOG_SIZE];
 extern uint8_t  logHead, logCount;
 extern uint32_t logTotal;
 
 bool        timeValid();
+uint32_t    logEntryTime(const LogEntry &e);        // Unix-Zeit des Eintrags, 0 = unbekannt
 String      eventName(EventType t);
 String      lastEventText();                        // juengster Eintrag, z.B. "Geöffnet (Web)"
 void        logEvent(EventType type, const String &detail = String());
@@ -129,7 +138,8 @@ void        logRestore(uint32_t t, uint8_t type, const String &detail);   // bei
 void        logMsgP(const char *fmtP, ...);
 #define     logMsg(fmt, ...) logMsgP(PSTR(fmt), ##__VA_ARGS__)
 void        syslogBegin();                          // Ziel (neu) aufloesen
-void        eventsFlush();                          // langen Verlauf in die Datei schreiben
+void        eventsFlush(bool force = false);        // langen Verlauf schreiben (gebuendelt; force: sofort)
+bool        eventsFreeSpace();                      // aelteren Verlauf loeschen (Platz fuer Einstellungen)
 void        eventsCsv(WEB_SERVER_CLASS &srv);       // langen Verlauf als CSV senden
 String      formatTime(uint32_t t);                 // "2026-10-02 08:46:12" (Ortszeit)
 
@@ -158,7 +168,7 @@ bool isRinging();
 bool isQuiet();
 bool isPraxis();
 void showPortalInfo(const char *ip);
-void checkEmergencyReset();
+bool checkEmergencyReset();       // true = Passwoerter beim Start zurueckgesetzt
 
 // ------------------------------------------------------------
 //  Telefon (phone.cpp)
@@ -222,6 +232,8 @@ void mqttEvent(EventType type, const String &detail);
 // ------------------------------------------------------------
 extern WEB_SERVER_CLASS server;
 void webBegin();
+// Antwortdaten mit Frist (millis) senden - die Loop steht nie unbegrenzt; false = abgebrochen
+bool webSend(const uint8_t *data, size_t len, uint32_t deadline, bool progmem = false);
 
 // ------------------------------------------------------------
 //  Netzwerk (net.cpp): WLAN oder Ethernet (WT32-ETH01)

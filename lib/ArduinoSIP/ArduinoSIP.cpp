@@ -45,6 +45,17 @@
 
 #include "ArduinoSIP.h"
 
+#ifndef PROGMEM
+  #define PROGMEM
+#endif
+#ifndef pgm_read_byte
+  #define pgm_read_byte(a) (*(const uint8_t *)(a))
+#endif
+
+// Groesstes SIP-Paket: ein UDP-Datagramm, das der ESP32 noch am Stueck sendet
+// und empfaengt (write() teilt groessere, recvfrom() schneidet ab)
+static const size_t SIP_MAX_UDP = 1460;
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 //
 // Hardware and API independent Sip class
@@ -65,7 +76,6 @@ Sip::Sip(char *pBuf, size_t lBuf) {
   caInCaller[0] = 0;
   caRingCaller[0] = 0;
   caLastCaller[0] = 0;
-  caRingCallId[0] = 0;
 }
 
 
@@ -87,9 +97,11 @@ void Sip::Init(const char *SipIp, int SipPort, const char *MyIp, int MyPort, con
   pMyIp = MyIp;
   iMyPort = MyPort;
   iAuthCnt = 0;
+  StopCall();
   iRingTime = 0;
   bIncoming = false;
   bInAckPending = false;
+  reqType = REQ_NONE;    // nichts mit alten Daten wiederholen
   iMaxTime = MaxDialSec * 1000;
   bRegistered = false;   // neue Zugangsdaten -> neu registrieren
   bRegPending = false;
@@ -97,14 +109,35 @@ void Sip::Init(const char *SipIp, int SipPort, const char *MyIp, int MyPort, con
   iRegGranted = 0;
   regCallId = 0;         // neue Registrierung (neue Call-ID)
 
-  // Server-Adresse fuer die Absenderpruefung eingehender Anfragen
-  sipAddr = IPAddress((uint32_t)0);
-  if ( SipIp[0] && !sipAddr.fromString(SipIp) )
-  {
-    IPAddress a;
-    if ( WiFi.hostByName(SipIp, a) == 1 )
-      sipAddr = a;
-  }
+  // Server-Adresse (Ziel aller Pakete, Absenderpruefung). Ein Hostname wird erst
+  // in StartRegister() aufgeloest (DNS blockiert die Loop, ESP8266 bis 10 s).
+  IPAddress a;
+  sipAddr  = IPAddress((uint32_t)0);
+  bSipHost = false;
+  if ( SipIp[0] && a.fromString(SipIp) )
+    sipAddr = a;
+  else if ( SipIp[0] )
+    bSipHost = true;
+}
+
+
+// Hostname der Anlage aufloesen: einmal je REGISTER-Zyklus statt bei jedem Paket,
+// so folgt der Client auch einem DHCP-Wechsel der Anlage. Waehrend eines Anrufs
+// nicht (DNS blockiert, Ton/DTMF stocken), dann gilt die letzte Adresse. Scheitert
+// die Aufloesung, bleibt die letzte bekannte Adresse; ohne eine wird nichts gesendet
+// und keine Anfrage angenommen - der naechste REGISTER-Versuch probiert es erneut.
+void Sip::ResolveServer() {
+
+  if ( !bSipHost || (iRingTime && (uint32_t)sipAddr != 0) )
+    return;
+  IPAddress a;
+#if defined(ESP8266)
+  int ok = WiFi.hostByName(pSipIp, a, 2000);   // statt 10 s Standard-Wartezeit
+#else
+  int ok = WiFi.hostByName(pSipIp, a);
+#endif
+  if ( ok == 1 && (uint32_t)a != 0 )
+    sipAddr = a;
 }
 
 
@@ -119,6 +152,12 @@ void Sip::StartRegister(int Expires) {
     iRegStatus = -1;
     return;
   }
+  ResolveServer();
+  if ( (uint32_t)sipAddr == 0 )
+  {
+    iRegStatus = -2;   // Adresse unbekannt, spaeter erneut versuchen
+    return;
+  }
   iRegExpires  = Expires;
   if ( regCallId == 0 )
   {
@@ -126,18 +165,21 @@ void Sip::StartRegister(int Expires) {
     regTag     = Random();
   }
   iRegCSeq++;
+  regBranch     = Random();
+  regSends      = 0;
   bRegAuthTried = false;
   bRegPending   = true;
   SendRegister(false);
 }
 
 
-// REGISTER senden, auf Wunsch mit dem Header aus caAuth
+// REGISTER senden, auf Wunsch mit dem Header aus caRegAuth. Wiederholungen
+// (regSends > 0) sind byte-gleich: gleicher Branch, gleiche CSeq.
 void Sip::SendRegister(bool withAuth) {
 
   pbuf[0] = 0;
   AddSipLine("REGISTER sip:%s SIP/2.0", pSipIp);
-  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=z9hG4bK%010u;rport", pMyIp, iMyPort, Random());
+  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=z9hG4bK%010u;rport", pMyIp, iMyPort, regBranch);
   AddSipLine("Max-Forwards: 70");
   AddSipLine("From: <sip:%s@%s>;tag=%010u", pSipUser, pSipIp, regTag);
   AddSipLine("To: <sip:%s@%s>", pSipUser, pSipIp);
@@ -145,13 +187,21 @@ void Sip::SendRegister(bool withAuth) {
   AddSipLine("CSeq: %i REGISTER", iRegCSeq);
   AddSipLine("Contact: <sip:%s@%s:%i;transport=udp>", pSipUser, pMyIp, iMyPort);
   if ( withAuth )
-    AddSipLine("%s", caAuth);
+    AddSipLine("%s", caRegAuth);
   AddSipLine("Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO");
   AddSipLine("Expires: %i", iRegExpires);
   AddSipLine("Content-Length: 0");
   AddSipLine("");
   SendUdp();
   regSentAt = millis();
+  if ( regSends == 0 )
+  {
+    regTxAt     = regSentAt;
+    regInterval = 500;                    // T1, dann 1 s, 2 s
+  }
+  else if ( regInterval < 2000 )
+    regInterval *= 2;
+  regSends++;
 }
 
 
@@ -176,6 +226,9 @@ void Sip::HandleRegisterResponse(const char *p) {
     if ( exp <= 0 )
       exp = GrepInteger(p, "\nExpires: ");
     iRegGranted = exp > 0 ? exp : 0;
+    // Gueltig ab der ersten Sendung dieser Anfrage (eher zu kurz als zu lang)
+    regOkAt    = regTxAt;
+    regValidMs = (uint32_t)(iRegGranted > 0 ? iRegGranted : iRegExpires) * 1000UL;
     return;
   }
 
@@ -184,17 +237,19 @@ void Sip::HandleRegisterResponse(const char *p) {
   {
     char uri[64];
     snprintf(uri, sizeof(uri), "sip:%s", pSipIp);
-    if ( BuildAuth(p, "REGISTER", uri) )
+    if ( BuildAuth(p, "REGISTER", uri, caRegAuth, sizeof(caRegAuth)) )
     {
       bRegAuthTried = true;
       iRegCSeq++;
+      regBranch = Random();   // neue Transaktion
+      regSends  = 0;
       SendRegister(true);
       return;
     }
   }
 
-  // Jede andere Endantwort = fehlgeschlagen; naechster Versuch mit neuer Call-ID
-  bRegistered = false;
+  // Jede andere Endantwort = fehlgeschlagen; naechster Versuch mit neuer Call-ID.
+  // Eine bestehende Anmeldung gilt beim Registrar bis zu ihrem Ablauf weiter.
   bRegPending = false;
   iRegStatus  = code;
   regCallId   = 0;
@@ -206,17 +261,24 @@ bool Sip::Dial(const char *DialNr, const char *DialDesc) {
   if ( iRingTime )
     return false;
 
-  iDialRetries = 0;
   bAnswered = false;
-  bGotResponse = false;
   bIncoming = false;
   eCallResult = CALL_NONE;
   iCallCode = 0;
+  cLastDtmf = 0;
   pDialNr = DialNr;
   pDialDesc = DialDesc;
-  Invite();
-  iDialRetries++;
   iRingTime = Millis();
+  // Ohne Server-Adresse oder zu gross: gar nicht erst warten, sondern gleich als
+  // gescheitert melden (Code wie eine SIP-Antwort, z.B. 503 / 513)
+  int err = Invite();
+  if ( err != 0 && err != 500 )
+  {
+    StopCall();
+    iRingTime = 0;
+    eCallResult = CALL_FAILED;
+    iCallCode = err;
+  }
 
   return true;
 }
@@ -226,13 +288,20 @@ void Sip::Processing(char *pBuf, size_t lBuf) {
 
   int packetSize = Udp.parsePacket();
   bool fromServer = false;
+  bool truncated = false;
+  int bodyAt = -1;
 
   if ( packetSize > 0 )
   {
-    // Anfragen (INVITE, BYE, INFO, ...) nur von der Anlage annehmen
-    fromServer = (uint32_t)sipAddr == 0 || Udp.remoteIP() == sipAddr;
+    // Anfragen (INVITE, BYE, INFO, ...) nur von der Anlage annehmen. Ist ihre
+    // Adresse (noch) unbekannt, keine - nicht still jeden Absender zulassen.
+    fromServer = (uint32_t)sipAddr != 0 && Udp.remoteIP() == sipAddr;
     pBuf[0] = 0;
     packetSize = Udp.read(pBuf, lBuf - 1);   // Platz fuer die Null am Ende
+    // Rest eines zu grossen Pakets verwerfen (ESP32: sonst kommt kein neues mehr)
+    char junk[64];
+    while ( Udp.available() > 0 && Udp.read(junk, sizeof(junk)) > 0 )
+      truncated = true;
     if ( packetSize > 0 )
     {
       pBuf[packetSize] = 0;
@@ -244,24 +313,30 @@ void Sip::Processing(char *pBuf, size_t lBuf) {
       Serial.printf("----------------------------------------------------\r\n");
 #endif
 
+      // Kopfzeilen vereinheitlichen; passt das Ergebnis nicht -> verwerfen
+      packetSize = Normalize(pBuf, packetSize, lBuf, &bodyAt);
+      // Content-Length groesser als der empfangene Body = abgeschnitten (der ESP32
+      // kuerzt Datagramme ueber 1460 Bytes ohne Meldung)
+      int cl = packetSize > 0 ? GrepInteger(pBuf, "\nContent-Length: ") : -1;
+      if ( cl > 0 && cl > packetSize - (bodyAt >= 0 ? bodyAt : packetSize) )
+        truncated = true;
+      // ohne vollstaendige Kopfzeilen nicht auswerten
+      if ( truncated && bodyAt < 0 )
+        packetSize = 0;
     }
   }
 
-  // REGISTER ohne Antwort -> abbrechen, der Aufrufer versucht es spaeter erneut
-  if ( bRegPending && (millis() - regSentAt) > 2000 )
-  {
-    bRegPending = false;
-    bRegistered = false;
-    iRegStatus  = 0;   // keine Antwort
-    regCallId   = 0;
-  }
-
-  HandleUdpPacket((packetSize > 0) ? pBuf : 0, fromServer);
+  // Erst das Paket auswerten, dann die Zeitgeber: eine Antwort, die im selben
+  // Durchlauf wie der Zeitablauf kommt, zaehlt noch
+  if ( packetSize > 0 )
+    HandleUdpPacket(pBuf, fromServer, truncated);
+  HandleTimers();
   RtpProcessing();
 }
 
 
-void Sip::HandleUdpPacket(const char *p, bool fromServer) {
+// Zeitgeber: Anrufdauer, Wiederholungen (UDP verliert Pakete), REGISTER-Ablauf
+void Sip::HandleTimers() {
 
   uint32_t iWorkTime = iRingTime ? (Millis() - iRingTime) : 0;
 
@@ -285,26 +360,43 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
     }
   }
 
-  if ( !p )
+  // Ausstehende Anfrage wiederholen (RFC 3261 Timer A/E): INVITE bis zur ersten
+  // Antwort (0,5 / 1 / 2 / 4 s ...), laengstens bis der Anruf endet; CANCEL und
+  // BYE bis zur Endantwort, hoechstens 4x in 3,5 s - auch nach dem Anruf
+  if ( reqType != REQ_NONE && (millis() - reqSentAt) > reqInterval )
   {
-    // INVITE wiederholen, solange noch gar keine Antwort kam (max. 5x)
-    if ( iRingTime && !bIncoming && !bGotResponse && iAuthCnt == 0
-         && iDialRetries < 5 && iWorkTime > (uint32_t)(iDialRetries * 200) )
+    if ( reqType == REQ_INVITE ? (iRingTime != 0 && !bIncoming) : reqSends < 4 )
     {
-      iDialRetries++;
-      Invite();
+      SendReq();
+      reqSends++;
+      reqSentAt = millis();
+      if ( reqType == REQ_INVITE || reqInterval < 2000 )
+        reqInterval *= 2;
     }
-
-    return;
+    else
+      reqType = REQ_NONE;   // keine Antwort - aufgeben
   }
+
+  // REGISTER ohne Antwort wiederholen (gleiche CSeq; 0,5 / 1 / 2 s), erst danach
+  // "keine Antwort". Eine bestehende Anmeldung gilt bis zu ihrem Ablauf weiter.
+  if ( bRegPending && (millis() - regSentAt) > regInterval )
+  {
+    if ( regSends < 4 )
+      SendRegister(bRegAuthTried);
+    else
+    {
+      bRegPending = false;
+      iRegStatus  = 0;   // keine Antwort; Call-ID bleibt (Bindung evtl. noch gueltig)
+    }
+  }
+  if ( bRegistered && (millis() - regOkAt) >= regValidMs )
+    bRegistered = false;   // abgelaufen (auch gegen Ueberlauf von millis())
+}
+
+
+void Sip::HandleUdpPacket(const char *p, bool fromServer, bool truncated) {
 
   bool isResponse = strncmp(p, "SIP/2.0 ", 8) == 0;
-
-  if ( isResponse && IsResponseTo(p, "REGISTER") )
-  {
-    HandleRegisterResponse(p);
-    return;
-  }
 
   // ---------------- Anfragen ----------------
   if ( !isResponse )
@@ -314,7 +406,7 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
 
     if ( IsRequest(p, "INVITE") )
     {
-      HandleIncomingInvite(p);
+      HandleIncomingInvite(p, truncated);
       return;
     }
     if ( IsRequest(p, "OPTIONS") || IsRequest(p, "NOTIFY") )
@@ -355,27 +447,94 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
     }
     else if ( IsRequest(p, "INFO") )
     {
-      // DTMF per SIP INFO (application/dtmf-relay): "Signal=*"
+      // DTMF per SIP INFO (application/dtmf-relay): "Signal=*". Herkunft merken.
       const char *sig = strstr(p, "Signal=");
-      if ( sig ) { char c = sig[7]; if ( c == ' ' ) c = sig[8]; if ( c > ' ' ) { cLastDtmf = c; iDtmfRx++; } }
+      if ( sig ) { char c = sig[7]; if ( c == ' ' ) c = sig[8]; if ( c > ' ' ) { cLastDtmf = c; bDtmfIncoming = ourIncoming; iDtmfRx++; } }
       Respond(p, 200, "OK");
     }
     return;
   }
 
-  // ---------------- Antworten auf unseren ausgehenden Anruf ----------------
-  if ( !IsCallId(p, callid) || !IsResponseTo(p, "INVITE") )
+  HandleResponse(p, fromServer);
+}
+
+
+// Liegt die Antwort (CSeq-Nummer cseq) zur ausstehenden CANCEL/BYE-Anfrage?
+bool Sip::IsReqResponse(const char *p, int cseq) {
+
+  if ( cseq != reqCSeq )
+    return false;
+  if ( reqType == REQ_CANCEL )
+    return IsResponseTo(p, "CANCEL") && IsCallId(p, callid);
+  if ( reqType == REQ_BYE )
+    return IsResponseTo(p, "BYE") && IsCallId(p, callid);
+  if ( reqType == REQ_BYE_IN )
+    return IsResponseTo(p, "BYE") && IsCallIdStr(p, caInCallId);
+  return false;
+}
+
+
+void Sip::HandleResponse(const char *p, bool fromServer) {
+
+  if ( IsResponseTo(p, "REGISTER") )
+  {
+    HandleRegisterResponse(p);
     return;
+  }
 
   int code = atoi(p + 8);
-  bGotResponse = true;
+  int cseq = GrepInteger(p, "\nCSeq: ");
+
+  // Endantwort auf unser CANCEL/BYE -> nicht mehr wiederholen
+  if ( IsResponseTo(p, "CANCEL") || IsResponseTo(p, "BYE") )
+  {
+    if ( code >= 200 && IsReqResponse(p, cseq) )
+      reqType = REQ_NONE;
+    return;
+  }
+
+  // ---------------- Antworten auf unseren ausgehenden Anruf ----------------
+  if ( !IsResponseTo(p, "INVITE") )
+    return;
+
+  if ( !IsCallId(p, callid) )
+  {
+    // Endantwort eines frueheren Anrufs (z.B. 487 nach CANCEL, waehrend schon die
+    // naechste Nummer gewaehlt wird): nur quittieren, sonst wiederholt die Anlage
+    if ( code >= 300 && fromServer )
+      Ack(p);
+    return;
+  }
+
+  // Antwort auf eine aeltere Transaktion (z.B. wiederholtes 401, weil unser ACK
+  // verloren ging): Endantwort nur quittieren, den laufenden Anruf nicht anfassen
+  if ( cseq != iInviteCSeq )
+  {
+    if ( code >= 300 )
+      Ack(p);
+    return;
+  }
+
+  // Irgendeine Antwort auf das aktuelle INVITE -> nicht mehr wiederholen; eine
+  // Endantwort erledigt auch ein ausstehendes CANCEL (487 = abgebrochen)
+  if ( reqType == REQ_INVITE || (reqType == REQ_CANCEL && code >= 200) )
+    reqType = REQ_NONE;
 
   if ( code == 401 || code == 407 )
   {
     Ack(p);
-    // call Invite with response data (p) to build auth md5 hashes
-    if ( iRingTime )
-      Invite(p);
+    if ( !iRingTime || bIncoming )
+      return;
+    // Nur einmal mit Digest antworten: eine erneute Aufforderung (auf das INVITE mit
+    // Zugangsdaten) heisst Zugangsdaten falsch -> Anruf beenden statt Schleife
+    int err = iAuthCnt > 0 ? -1 : Invite(p);
+    if ( err != 0 && err != 500 )
+    {
+      StopCall();
+      iRingTime = 0;
+      eCallResult = CALL_FAILED;
+      iCallCode = err > 0 ? err : code;
+    }
   }
   else if ( code >= 200 && code < 300 )		// OK
   {
@@ -384,7 +543,7 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
     if ( !iRingTime || bIncoming )
     {
       // Angenommen, waehrend unser CANCEL unterwegs war -> sauber beenden
-      Bye(iInviteCSeq + 1);
+      StartReq(REQ_BYE, iInviteCSeq + 1);
       return;
     }
     if ( bAnswered )
@@ -403,7 +562,7 @@ void Sip::HandleUdpPacket(const char *p, bool fromServer) {
   else
   {
     Ack(p);
-    if ( !iRingTime )
+    if ( !iRingTime || bIncoming )
       return;
     StopCall();
     iRingTime = 0;
@@ -471,26 +630,156 @@ void Sip::AddCopyAllLines(const char *p, const char *psearch) {
 }
 
 
-// Parse parameter value from http formated string
-bool Sip::ParseParameter(char *dest, int destlen, const char *name, const char *line, char cq) {
+// Header-Namen fuer Normalize(): Kurzform (bzw. '-') und Langform, wie sie die
+// Suchen im Code erwarten ("\nCall-ID: " ...). Im Flash (ESP8266: spart RAM).
+static const char kHeaderNames[] PROGMEM =
+  "iCall-ID\0" "fFrom\0" "tTo\0" "vVia\0" "mContact\0" "lContent-Length\0"
+  "cContent-Type\0" "kSupported\0" "sSubject\0" "eContent-Encoding\0"
+  "-CSeq\0" "-Expires\0" "-WWW-Authenticate\0" "-Proxy-Authenticate\0";
 
-  const char *r = strstr(line, name);
+static char Lower(char c) { return ( c >= 'A' && c <= 'Z' ) ? (char)(c + 32) : c; }
 
-  if ( r == NULL )
+// Langform (im Flash) zum Header-Namen [n, n + nl), sonst nullptr
+static const char *CanonicalHeader(const char *n, size_t nl) {
+
+  const char *t = kHeaderNames;
+  while ( pgm_read_byte(t) )
+  {
+    char k = (char)pgm_read_byte(t);
+    const char *name = t + 1;
+    if ( nl == 1 && k != '-' && Lower(n[0]) == k )
+      return name;
+    size_t i = 0;
+    while ( i < nl && pgm_read_byte(name + i) && Lower((char)pgm_read_byte(name + i)) == Lower(n[i]) )
+      i++;
+    if ( i == nl && pgm_read_byte(name + i) == 0 )
+      return name;
+    while ( pgm_read_byte(name + i) )
+      i++;
+    t = name + i + 1;
+  }
+  return nullptr;
+}
+
+// n Bytes an dst[o] anhaengen (pgm: Quelle im Flash, bis zur Null)
+static bool PutBytes(char *dst, size_t cap, size_t &o, const char *s, size_t n, bool pgm = false) {
+
+  if ( pgm )
+    for ( n = 0; pgm_read_byte(s + n); n++ ) {}
+  if ( o + n > cap )
     return false;
-
-  r += strlen(name);
-  const char *qp = strchr(r, cq);
-  if ( qp == NULL )
-    return false;   // kein Endzeichen -> kaputtes Paket
-
-  int l = qp - r;
-  if ( l < 0 || l >= destlen )
-    return false;
-
-  memcpy(dest, r, l);
-  dest[l] = 0;
+  for ( size_t i = 0; i < n; i++ )
+    dst[o + i] = pgm ? (char)pgm_read_byte(s + i) : s[i];
+  o += n;
   return true;
+}
+
+static bool IsWsp(char c) { return c == ' ' || c == '\t'; }
+
+
+// Empfangene Nachricht vereinheitlichen (RFC 3261 7.3): Header-Namen in beliebiger
+// Schreibweise oder Kurzform ("i:", "f:", "t:", ...) und mit Leerraum um den
+// Doppelpunkt werden zu "Name: Wert", Folgezeilen werden angehaengt. So finden die
+// Suchen im Code ("\nCall-ID: " ...) jede Schreibweise. Startzeile und Body bleiben
+// unveraendert; pbuf dient als Zwischenspeicher. Liefert die neue Laenge (bodyAt =
+// Beginn des Body, -1 ohne Leerzeile) oder -1, wenn das Ergebnis nicht passt.
+int Sip::Normalize(char *buf, int len, size_t cap, int *bodyAt) {
+
+  // Ende der Kopfzeilen: Leerzeile (CRLF CRLF bzw. LF LF)
+  int he = len;
+  *bodyAt = -1;
+  for ( int i = 0; i < len; i++ )
+  {
+    if ( buf[i] != '\n' )
+      continue;
+    if ( i + 1 < len && buf[i + 1] == '\n' )
+    {
+      he = i + 1; *bodyAt = i + 2; break;
+    }
+    if ( i + 2 < len && buf[i + 1] == '\r' && buf[i + 2] == '\n' )
+    {
+      he = i + 1; *bodyAt = i + 3; break;
+    }
+  }
+
+  size_t o = 0;
+  bool ok = true;
+  for ( int i = 0; ok && i < he; )
+  {
+    int e = i;
+    while ( e < he && buf[e] != '\n' )
+      e++;
+    int nx = e < he ? e + 1 : e;                         // naechste Zeile
+    int ce = ( e > i && buf[e - 1] == '\r' ) ? e - 1 : e; // Ende des Inhalts
+    const char *c = (const char *)memchr(buf + i, ':', ce - i);
+
+    if ( i == 0 )
+      ok = PutBytes(pbuf, lbuf, o, buf + i, nx - i);     // Startzeile
+    else if ( IsWsp(buf[i]) )
+    {
+      // Folgezeile: Zeilenumbruch + Leerraum = ein Leerzeichen
+      while ( o > 0 && ( pbuf[o - 1] == '\n' || pbuf[o - 1] == '\r' ) )
+        o--;
+      int s = i;
+      while ( s < ce && IsWsp(buf[s]) ) s++;
+      ok = PutBytes(pbuf, lbuf, o, " ", 1) && PutBytes(pbuf, lbuf, o, buf + s, ce - s)
+           && PutBytes(pbuf, lbuf, o, buf + ce, nx - ce);
+    }
+    else if ( !c )
+      ok = PutBytes(pbuf, lbuf, o, buf + i, nx - i);     // keine Kopfzeile: unveraendert
+    else
+    {
+      int ne = c - buf;
+      while ( ne > i && IsWsp(buf[ne - 1]) ) ne--;
+      int vs = c - buf + 1;
+      while ( vs < ce && IsWsp(buf[vs]) ) vs++;
+      int ve = ce;
+      while ( ve > vs && IsWsp(buf[ve - 1]) ) ve--;
+      const char *cn = CanonicalHeader(buf + i, ne - i);
+      ok = ( cn ? PutBytes(pbuf, lbuf, o, cn, 0, true) : PutBytes(pbuf, lbuf, o, buf + i, ne - i) )
+           && PutBytes(pbuf, lbuf, o, ": ", 2) && PutBytes(pbuf, lbuf, o, buf + vs, ve - vs)
+           && PutBytes(pbuf, lbuf, o, buf + ce, nx - ce);
+    }
+    i = nx;
+  }
+
+  size_t tail = len - he;   // Leerzeile und Body
+  if ( !ok || o + tail + 1 > cap )
+  {
+    pbuf[0] = 0;
+    return -1;
+  }
+  memmove(buf + o, buf + he, tail);
+  memcpy(buf, pbuf, o);
+  buf[o + tail] = 0;
+  pbuf[0] = 0;
+  if ( *bodyAt >= 0 )
+    *bodyAt = (int)o + (*bodyAt - he);
+  return (int)(o + tail);
+}
+
+
+// Wert eines Headers (name z.B. "\nFrom: "): Anfang und Laenge bis zum Zeilenende
+static const char *FindHeader(const char *p, const char *name, size_t *len) {
+
+  const char *pa = strstr(p, name);
+
+  if ( !pa )
+    return nullptr;
+  pa += strlen(name);
+  const char *pe = strpbrk(pa, "\r\n");
+  *len = pe ? (size_t)(pe - pa) : strlen(pa);
+  return pa;
+}
+
+
+// Enthaelt der Header-Wert [v, v + l) einen Tag (";tag=")?
+static bool HasTag(const char *v, size_t l) {
+
+  for ( size_t i = 0; v && i + 5 <= l; i++ )
+    if ( strncasecmp(v + i, ";tag=", 5) == 0 )
+      return true;
+  return false;
 }
 
 
@@ -525,7 +814,7 @@ bool Sip::IsCallId(const char *p, uint32_t id32) {
   char id[40];
   snprintf(id, sizeof(id), "%010u@%s", id32, pMyIp);
   size_t l = strlen(id);
-  return strncmp(pc + 10, id, l) == 0 && ( pc[10 + l] == '\r' || pc[10 + l] == '\n' );
+  return strncmp(pc + 10, id, l) == 0 && ( pc[10 + l] == '\r' || pc[10 + l] == '\n' || pc[10 + l] == 0 );
 }
 
 
@@ -538,7 +827,7 @@ bool Sip::IsCallIdStr(const char *p, const char *id) {
     return false;
 
   size_t l = strlen(id);
-  return strncmp(pc + 10, id, l) == 0 && ( pc[10 + l] == '\r' || pc[10 + l] == '\n' );
+  return strncmp(pc + 10, id, l) == 0 && ( pc[10 + l] == '\r' || pc[10 + l] == '\n' || pc[10 + l] == 0 );
 }
 
 
@@ -570,22 +859,46 @@ bool Sip::IsResponseTo(const char *p, const char *method) {
 // Wert eines Headers (name z.B. "\nFrom: ") bis zum Zeilenende kopieren
 bool Sip::HeaderValue(const char *p, const char *name, char *dest, size_t destlen) {
 
-  const char *pa = strstr(p, name);
+  size_t l;
+  const char *pa = FindHeader(p, name, &l);
 
-  if ( !pa )
-    return false;
-
-  pa += strlen(name);
-  const char *pe = strpbrk(pa, "\r\n");
-  if ( !pe )
-    pe = pa + strlen(pa);
-
-  size_t l = pe - pa;
-  if ( l >= destlen )
+  if ( !pa || l >= destlen )
     return false;
 
   memcpy(dest, pa, l);
   dest[l] = 0;
+  return true;
+}
+
+
+// URI aus To/Contact kopieren: "<sip:...>" (auch mit Anzeigename davor) oder
+// ohne spitze Klammern bis zum ersten Parameter (';')
+bool Sip::HeaderUri(const char *p, const char *name, char *dest, size_t destlen) {
+
+  size_t l;
+  const char *v = FindHeader(p, name, &l);
+
+  if ( !v )
+    return false;
+  const char *s = (const char *)memchr(v, '<', l);
+  const char *e;
+  if ( s )
+  {
+    s++;
+    e = (const char *)memchr(s, '>', v + l - s);
+    if ( !e )
+      return false;   // kein Endzeichen -> kaputtes Paket
+  }
+  else
+  {
+    s = v;
+    e = s;
+    while ( e < v + l && *e != ';' && !IsWsp(*e) ) e++;
+  }
+  if ( e <= s || (size_t)(e - s) >= destlen )
+    return false;
+  memcpy(dest, s, e - s);
+  dest[e - s] = 0;
   return true;
 }
 
@@ -645,9 +958,15 @@ static bool AuthParam(const char *start, const char *end, const char *name, char
 }
 
 
-// Digest-Antwort (RFC 2617, auch mit qop=auth und opaque) nach caAuth schreiben
-bool Sip::BuildAuth(const char *p, const char *method, const char *uri) {
+// Digest-Antwort (RFC 2617, auch mit qop=auth und opaque) nach out (Standard:
+// caAuth) schreiben
+bool Sip::BuildAuth(const char *p, const char *method, const char *uri, char *out, size_t outLen) {
 
+  if ( !out )
+  {
+    out    = caAuth;
+    outLen = sizeof(caAuth);
+  }
   bool proxy = false;
   const char *h = strstr(p, "\nWWW-Authenticate:");
   if ( !h )
@@ -693,16 +1012,16 @@ bool Sip::BuildAuth(const char *p, const char *method, const char *uri) {
     snprintf(temp, sizeof(temp), "%s:%s:%s", ha1, nonce, ha2);
   MakeMd5Digest(resp, temp);
 
-  int n = snprintf(caAuth, sizeof(caAuth),
+  int n = snprintf(out, outLen,
            "%s: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\", algorithm=MD5",
            proxy ? "Proxy-Authorization" : "Authorization", pSipUser, realm, nonce, uri, resp);
-  if ( n < 0 || n >= (int)sizeof(caAuth) )
+  if ( n < 0 || n >= (int)outLen )
     return false;
   if ( useQop )
-    n += snprintf(caAuth + n, sizeof(caAuth) - n, ", qop=auth, nc=00000001, cnonce=\"%s\"", cnonce);
-  if ( opaque[0] && n < (int)sizeof(caAuth) )
-    n += snprintf(caAuth + n, sizeof(caAuth) - n, ", opaque=\"%s\"", opaque);
-  return n < (int)sizeof(caAuth);
+    n += snprintf(out + n, outLen - n, ", qop=auth, nc=00000001, cnonce=\"%s\"", cnonce);
+  if ( opaque[0] && n < (int)outLen )
+    n += snprintf(out + n, outLen - n, ", opaque=\"%s\"", opaque);
+  return n < (int)outLen;
 }
 
 
@@ -710,7 +1029,8 @@ void Sip::Ack(const char *p) {
 
   char ca[128];
 
-  if ( !ParseParameter(ca, (int)sizeof(ca), "\nTo: <", p, '>') )
+  // Ziel = URI aus To, mit oder ohne <> (RFC 3261 erlaubt beides)
+  if ( !HeaderUri(p, "\nTo: ", ca, sizeof(ca)) )
     return;
 
   pbuf[0] = 0;
@@ -729,7 +1049,7 @@ void Sip::Ack(const char *p) {
 
 // CANCEL fuer das noch nicht angenommene INVITE. Muss Request-URI, Call-ID,
 // From, To (ohne Tag), Via und CSeq-Nummer des INVITE exakt uebernehmen.
-void Sip::Cancel() {
+int Sip::Cancel() {
 
   pbuf[0] = 0;
   AddSipLine("CANCEL sip:%s@%s SIP/2.0", pDialNr, pSipIp);
@@ -741,14 +1061,14 @@ void Sip::Cancel() {
   AddSipLine("To: <sip:%s@%s>", pDialNr, pSipIp);
   AddSipLine("Content-Length: 0");
   AddSipLine("");
-  SendUdp();
+  return SendUdp();
 }
 
 
-void Sip::Bye(int cseq) {
+int Sip::Bye(int cseq) {
 
   if ( caRead[0] == 0 )
-    return;
+    return -1;
 
   pbuf[0] = 0;
   AddSipLine("%s sip:%s@%s SIP/2.0",  "BYE", pDialNr, pSipIp);
@@ -758,29 +1078,73 @@ void Sip::Bye(int cseq) {
   AddSipLine("User-Agent: sip-client/0.0.1");
   AddSipLine("Content-Length: 0");
   AddSipLine("");
-  SendUdp();
+  return SendUdp();
 }
 
 
-// Antwort ohne Inhalt auf eine Anfrage (alle Via-Zeilen, To ggf. mit Tag)
-void Sip::Respond(const char *p, int code, const char *reason) {
+// Anfrage senden und fuer Wiederholungen merken (siehe HandleTimers()). Eine neue
+// Anfrage ersetzt die vorige. Liefert das Ergebnis von SendUdp(); laesst sie sich
+// gar nicht senden (keine Adresse, zu gross, keine Daten), wird nicht wiederholt.
+int Sip::StartReq(uint8_t type, int cseq) {
+
+  reqType     = type;
+  reqCSeq     = cseq;
+  reqSends    = 1;
+  reqInterval = 500;   // T1
+  int err = SendReq();
+  reqSentAt   = millis();
+  if ( err != 0 && err != 500 )
+    reqType = REQ_NONE;
+  return err;
+}
+
+
+// Ausstehende Anfrage (erneut) senden - aus dem Zustand gebaut, also byte-gleich
+int Sip::SendReq() {
+
+  switch ( reqType )
+  {
+    case REQ_INVITE: return SendInvite();
+    case REQ_CANCEL: return Cancel();
+    case REQ_BYE:    return Bye(reqCSeq);
+    case REQ_BYE_IN: return ByeIncoming(reqCSeq);
+  }
+  return -1;
+}
+
+
+// Antwort ohne Inhalt auf eine Anfrage (alle Via-Zeilen, To ggf. mit Tag);
+// mit sdp als 200 OK auf ein (Re-)INVITE mit unserem Contact und SDP
+void Sip::Respond(const char *p, int code, const char *reason, const char *sdp) {
 
   pbuf[0] = 0;
   AddSipLine("SIP/2.0 %i %s", code, reason);
   AddCopyAllLines(p, "\nVia: ");
   AddCopySipLine(p, "\nFrom: ");
-  char to[160];
-  if ( HeaderValue(p, "\nTo: ", to, sizeof(to)) )
+  size_t l;
+  const char *to = FindHeader(p, "\nTo: ", &l);
+  if ( to )
   {
-    if ( strstr(to, ";tag=") || code < 200 )
-      AddSipLine("To: %s", to);
+    if ( HasTag(to, l) || code < 200 )
+      AddSipLine("To: %.*s", (int)l, to);
     else
-      AddSipLine("To: %s;tag=%010u", to, Random());
+      AddSipLine("To: %.*s;tag=%010u", (int)l, to, Random());
   }
   AddCopySipLine(p, "\nCall-ID: ");
   AddCopySipLine(p, "\nCSeq: ");
-  AddSipLine("Content-Length: 0");
-  AddSipLine("");
+  if ( sdp )
+  {
+    AddSipLine("Contact: <sip:%s@%s:%i;transport=udp>", pSipUser, pMyIp, iMyPort);
+    AddSipLine("Content-Type: application/sdp");
+    AddSipLine("Content-Length: %i", (int)strlen(sdp));
+    AddSipLine("");
+    strncat(pbuf, sdp, lbuf - strlen(pbuf) - 1);
+  }
+  else
+  {
+    AddSipLine("Content-Length: 0");
+    AddSipLine("");
+  }
   SendUdp();
 }
 
@@ -810,6 +1174,10 @@ int Sip::BuildSdp(char *out, size_t len, bool offer) {
   char pts[12] = "";
   if ( dtmfPt < 128 )
     snprintf(pts, sizeof(pts), " %u", dtmfPt);
+  // Sitzung: eingehend unser Tag; ausgehend (Antwort auf ein Re-INVITE) die des
+  // Angebots im INVITE, Version + 1
+  uint32_t sid = bIncoming ? inTag : callid;
+  uint32_t ver = bIncoming ? inTag : callid + 1;
   return snprintf(out, len,
     "v=0\r\n"
     "o=- %010u %010u IN IP4 %s\r\n"
@@ -821,30 +1189,23 @@ int Sip::BuildSdp(char *out, size_t len, bool offer) {
     "%s"
     "a=ptime:20\r\n"
     "a=sendrecv\r\n",
-    inTag, inTag, pMyIp, pMyIp, iRtpPort, rtpPt, pts,
+    sid, ver, pMyIp, pMyIp, iRtpPort, rtpPt, pts,
     rtpPt, rtpPt == 8 ? "PCMA" : "PCMU", dtmf);
 }
 
 
-// Call invite without or with the response from peer
-void Sip::Invite(const char *p) {
-
-  // prevent loops
-  if ( p && iAuthCnt > 3 )
-    return;
-
-  int cseq = 1;
+// Call invite without or with the response from peer: ohne p neuer Anruf (neue
+// Call-ID, Tag, Branch), mit p (401/407) mit Digest als neue Transaktion (CSeq + 1,
+// neuer Branch). Liefert das Ergebnis von SendUdp(), -1 = Digest nicht moeglich.
+int Sip::Invite(const char *p) {
 
   if ( !p )
   {
     iAuthCnt = 0;
-
-    if ( iDialRetries == 0 )
-    {
-      callid = Random();
-      tagid = Random();
-      branchid = Random();
-    }
+    callid = Random();
+    tagid = Random();
+    branchid = Random();
+    iInviteCSeq = 1;
   }
   else
   {
@@ -853,16 +1214,25 @@ void Sip::Invite(const char *p) {
     if ( !BuildAuth(p, "INVITE", uri) )
     {
       caRead[0] = 0;
-      return;
+      return -1;
     }
-    cseq = iInviteCSeq + 1;
+    iInviteCSeq++;         // fuer CANCEL (gleiche Nummer) und BYE (hoeher)
     branchid = Random();   // neue Transaktion -> neuer Branch
+    iAuthCnt++;
   }
+  caRead[0] = 0;
+  return StartReq(REQ_INVITE, iInviteCSeq);
+}
+
+
+// INVITE aus dem Zustand bauen und senden; Wiederholungen sind byte-gleich
+// (gleicher Branch, gleiche CSeq, gleicher Authorization-Header)
+int Sip::SendInvite() {
 
   pbuf[0] = 0;
   AddSipLine("INVITE sip:%s@%s SIP/2.0", pDialNr, pSipIp);
   AddSipLine("Call-ID: %010u@%s",  callid, pMyIp);
-  AddSipLine("CSeq: %i INVITE",  cseq);
+  AddSipLine("CSeq: %i INVITE",  iInviteCSeq);
   AddSipLine("Max-Forwards: 70");
   // not needed for fritzbox
   // AddSipLine("User-Agent: sipdial by jl");
@@ -871,11 +1241,8 @@ void Sip::Invite(const char *p) {
   AddSipLine("To: <sip:%s@%s>", pDialNr, pSipIp);
   AddSipLine("Contact: \"%s\" <sip:%s@%s:%i;transport=udp>", pSipUser, pSipUser, pMyIp, iMyPort);
 
-  if ( p )
-  {
+  if ( iAuthCnt > 0 )
     AddSipLine("%s", caAuth);
-    iAuthCnt++;
-  }
 
   if ( iBeepSeconds > 0 )
   {
@@ -894,9 +1261,7 @@ void Sip::Invite(const char *p) {
     AddSipLine("Content-Length: 0");
     AddSipLine("");
   }
-  caRead[0] = 0;
-  iInviteCSeq = cseq;   // fuer CANCEL (gleiche Nummer) und BYE (hoeher)
-  SendUdp();
+  return SendUdp();
 }
 
 
@@ -927,14 +1292,13 @@ bool Sip::ParseOffer(const char *p) {
   if ( !hasA && !hasU )
     return false;
 
-  rtpPt  = hasA ? 8 : 0;
-  dtmfPt = 0xFF;   // ohne telephone-event nur DTMF per SIP INFO
+  uint8_t dpt = 0xFF;   // ohne telephone-event nur DTMF per SIP INFO
   for ( const char *r = strstr(p, "a=rtpmap:"); r; r = strstr(r + 9, "a=rtpmap:") )
   {
     const char *sp = strchr(r + 9, ' ');
     if ( sp && strncmp(sp + 1, "telephone-event", 15) == 0 )
     {
-      dtmfPt = (uint8_t)atoi(r + 9);
+      dpt = (uint8_t)atoi(r + 9);
       break;
     }
   }
@@ -948,33 +1312,65 @@ bool Sip::ParseOffer(const char *p) {
   while ( i < (int)sizeof(ip) - 1 && *c && *c != '\r' && *c != '\n' && *c != ' ' )
     ip[i++] = *c++;
   ip[i] = 0;
-  if ( !remoteRtpIp.fromString(ip) )
+  IPAddress a;   // fromString() schreibt beim ESP8266 auch bei Fehler teilweise
+  if ( !a.fromString(ip) )
     return false;
+  // Erst jetzt uebernehmen: ein unpassendes Angebot (Re-INVITE) aendert nichts
+  rtpPt         = hasA ? 8 : 0;
+  dtmfPt        = dpt;
+  remoteRtpIp   = a;
   remoteRtpPort = port;
   return true;
 }
 
 
-// Rufnummer aus der From-Zeile ("sip:NUMMER@...") nach out
-static void CallerFrom(const char *from, char *out, size_t len) {
+// Rufnummer aus From ("Name" <sip:NUMMER@...>, auch sips:/tel:, ohne <>) nach out;
+// leer, wenn nicht lesbar
+static void CallerFrom(const char *v, size_t vl, char *out, size_t len) {
   out[0] = 0;
-  const char *u = strstr(from, "sip:");
-  if ( !u )
-    return;
-  u += 4;
-  const char *at = strpbrk(u, "@;>");
-  size_t l = at ? (size_t)(at - u) : strlen(u);
+  const char *e = v + vl;
+  const char *u = (const char *)memchr(v, '<', vl);
+  u = u ? u + 1 : v;
+  while ( u < e && IsWsp(*u) ) u++;
+  if ( e - u > 4 && strncasecmp(u, "sip:", 4) == 0 )       u += 4;
+  else if ( e - u > 5 && strncasecmp(u, "sips:", 5) == 0 ) u += 5;
+  else if ( e - u > 4 && strncasecmp(u, "tel:", 4) == 0 )  u += 4;
+  else return;
+  const char *at = u;
+  while ( at < e && *at != '@' && *at != ';' && *at != '>' && !IsWsp(*at) ) at++;
+  size_t l = at - u;
   if ( l >= len ) l = len - 1;
   memcpy(out, u, l);
   out[l] = 0;
 }
 
 
-void Sip::HandleIncomingInvite(const char *p) {
+// FNV-1a ueber den Wert eines Headers (z.B. Call-ID beliebiger Laenge)
+static uint32_t HeaderHash(const char *p, const char *name) {
+  size_t l = 0;
+  const char *v = FindHeader(p, name, &l);
+  uint32_t h = 2166136261UL;
+  for ( size_t i = 0; v && i < l; i++ )
+  {
+    h ^= (uint8_t)v[i];
+    h *= 16777619UL;
+  }
+  return h;
+}
+
+
+// truncated: abgeschnitten (groesser als der Puffer) -> 513 statt mit halbem SDP
+// weiterzuarbeiten; ein Klingel-Anruf braucht kein SDP und wird trotzdem erkannt
+void Sip::HandleIncomingInvite(const char *p, bool truncated) {
 
   // Re-INVITE im laufenden eingehenden Gespraech (z.B. Media-Wechsel)
   if ( bIncoming && iRingTime && IsCallIdStr(p, caInCallId) )
   {
+    if ( truncated )
+    {
+      Respond(p, 513, "Message Too Large");
+      return;
+    }
     pbuf[0] = 0;
     AddCopyAllLines(p, "\nVia: ");
     if ( strlen(pbuf) < sizeof(caInVia) ) strcpy(caInVia, pbuf);
@@ -984,19 +1380,45 @@ void Sip::HandleIncomingInvite(const char *p) {
     return;
   }
 
+  // Re-INVITE im laufenden ausgehenden Gespraech (gleiche Call-ID): kein neuer
+  // Anruf - also auch kein Klingeln ueber den Filter
+  if ( !bIncoming && iRingTime && IsCallId(p, callid) )
+  {
+    if ( truncated )
+      Respond(p, 513, "Message Too Large");
+    else
+      HandleOutgoingReinvite(p);
+    return;
+  }
+
+  // Anfrage in einem Dialog, den es nicht (mehr) gibt (To mit Tag, z.B. Re-INVITE
+  // nach dem Auflegen): weder Anruf noch Klingeln
+  size_t tl = 0;
+  const char *to = FindHeader(p, "\nTo: ", &tl);
+  if ( to && HasTag(to, tl) )
+  {
+    Respond(p, 481, "Call/Transaction Does Not Exist");
+    return;
+  }
+
   // Nummer des Anrufers merken (zum Einrichten) und pruefen, ob es ein
   // Klingel-Anruf ist: dann abweisen (486 = nur hier besetzt, nicht 6xx -
-  // sonst bricht die Anlage evtl. den ganzen Gruppenruf ab) und melden
-  char from[160], callId[100];
-  if ( HeaderValue(p, "\nFrom: ", from, sizeof(from)) )
-    CallerFrom(from, caLastCaller, sizeof(caLastCaller));
-  if ( pRingFilter && pRingFilter(caLastCaller) )
+  // sonst bricht die Anlage evtl. den ganzen Gruppenruf ab) und melden.
+  // Vorher leeren: bei unlesbarem From nie die Nummer des vorigen Anrufers pruefen.
+  caLastCaller[0] = 0;
+  size_t fl = 0;
+  const char *from = FindHeader(p, "\nFrom: ", &fl);
+  if ( from )
+    CallerFrom(from, fl, caLastCaller, sizeof(caLastCaller));
+  if ( pRingFilter && caLastCaller[0] && pRingFilter(caLastCaller) )
   {
     Respond(p, 486, "Busy Here");
-    // INVITE-Wiederholungen (gleiche Call-ID) nur einmal melden
-    if ( HeaderValue(p, "\nCall-ID: ", callId, sizeof(callId)) && strcmp(callId, caRingCallId) != 0 )
+    // INVITE-Wiederholungen (gleiche Call-ID) nur einmal melden; die Call-ID nur
+    // als Hash merken (auch ueberlange werden gemeldet, spart RAM)
+    uint32_t h = HeaderHash(p, "\nCall-ID: ");
+    if ( h != ringCallIdHash )
     {
-      strcpy(caRingCallId, callId);
+      ringCallIdHash = h;
       strcpy(caRingCaller, caLastCaller);
       bRingCall = true;
     }
@@ -1013,8 +1435,17 @@ void Sip::HandleIncomingInvite(const char *p) {
     Respond(p, 603, "Decline");
     return;
   }
+  if ( truncated )
+  {
+    Respond(p, 513, "Message Too Large");
+    return;
+  }
 
-  char contact[160];
+  // Ab hier werden die Daten des neuen Anrufs gemerkt: ein noch ausstehendes BYE
+  // des vorigen eingehenden Anrufs nutzt sie und wird nicht mehr wiederholt
+  if ( reqType == REQ_BYE_IN )
+    reqType = REQ_NONE;
+
   pbuf[0] = 0;
   AddCopyAllLines(p, "\nVia: ");
   if ( strlen(pbuf) >= sizeof(caInVia)
@@ -1023,6 +1454,7 @@ void Sip::HandleIncomingInvite(const char *p) {
        || !HeaderValue(p, "\nTo: ", caInTo, sizeof(caInTo))
        || strstr(caInTo, ";tag=") )
   {
+    caInCallId[0] = 0;
     Respond(p, 400, "Bad Request");
     return;
   }
@@ -1030,20 +1462,11 @@ void Sip::HandleIncomingInvite(const char *p) {
   iInCSeq = GrepInteger(p, "\nCSeq: ");
 
   // Ziel fuer unser BYE: URI aus Contact (sonst die Anlage)
-  caInContact[0] = 0;
-  if ( HeaderValue(p, "\nContact: ", contact, sizeof(contact)) )
-  {
-    const char *s = strchr(contact, '<');
-    s = s ? s + 1 : contact;
-    const char *e = strpbrk(s, s == contact ? ";> " : ">");
-    size_t l = e ? (size_t)(e - s) : strlen(s);
-    if ( l < sizeof(caInContact) ) { memcpy(caInContact, s, l); caInContact[l] = 0; }
-  }
-  if ( !caInContact[0] )
+  if ( !HeaderUri(p, "\nContact: ", caInContact, sizeof(caInContact)) )
     snprintf(caInContact, sizeof(caInContact), "sip:%s", pSipIp);
 
   // Rufnummer des Anrufers fuer das Protokoll
-  CallerFrom(caInFrom, caInCaller, sizeof(caInCaller));
+  CallerFrom(caInFrom, strlen(caInFrom), caInCaller, sizeof(caInCaller));
 
   if ( !ParseOffer(p) )
   {
@@ -1057,11 +1480,28 @@ void Sip::HandleIncomingInvite(const char *p) {
   bAnswered    = true;
   iRingTime    = Millis();
   bNewIncoming = true;
+  cLastDtmf    = 0;
   SendIncomingOk();
   bInAckPending = true;
   inOkFirstAt   = millis();
   inOkInterval  = 500;
   StartStream(1);   // kurzer Ton: "bitte Code eingeben"
+}
+
+
+// Re-INVITE im laufenden ausgehenden Gespraech (Anlage aendert z.B. das
+// Medienziel): mit unserem SDP annehmen und das neue Ziel uebernehmen wie beim
+// eingehenden Anruf; ohne passenden Codec (bzw. noch nicht angenommen) 488
+void Sip::HandleOutgoingReinvite(const char *p) {
+
+  if ( !bAnswered || ( strstr(p, "\nm=audio ") && !ParseOffer(p) ) )
+  {
+    Respond(p, 488, "Not Acceptable Here");
+    return;
+  }
+  char sdp[400];
+  BuildSdp(sdp, sizeof(sdp), false);
+  Respond(p, 200, "OK", sdp);
 }
 
 
@@ -1087,19 +1527,20 @@ void Sip::SendIncomingOk() {
 }
 
 
-void Sip::ByeIncoming() {
+// BYE fuer den eingehenden Anruf; Wiederholungen mit gleichem Branch und CSeq
+int Sip::ByeIncoming(int cseq) {
 
   pbuf[0] = 0;
   AddSipLine("BYE %s SIP/2.0", caInContact);
-  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=z9hG4bK%010u;rport", pMyIp, iMyPort, Random());
+  AddSipLine("Via: SIP/2.0/UDP %s:%i;branch=z9hG4bK%010u;rport", pMyIp, iMyPort, inByeBranch);
   AddSipLine("Max-Forwards: 70");
   AddSipLine("From: %s;tag=%010u", caInTo, inTag);
   AddSipLine("To: %s", caInFrom);
   AddSipLine("Call-ID: %s", caInCallId);
-  AddSipLine("CSeq: %i BYE", iInByeCSeq++);
+  AddSipLine("CSeq: %i BYE", cseq);
   AddSipLine("Content-Length: 0");
   AddSipLine("");
-  SendUdp();
+  return SendUdp();
 }
 
 
@@ -1126,17 +1567,30 @@ uint32_t Sip::Random() {
 }
 
 
+// Paket aus pbuf an die Anlage senden. Liefert 0 oder den Grund wie einen
+// SIP-Code: 503 = Server-Adresse unbekannt, 513 = zu gross, 500 = UDP-Fehler.
 int Sip::SendUdp() {
 
-  Udp.beginPacket(pSipIp, iSipPort);
-  Udp.write((const uint8_t *)pbuf, strlen(pbuf));
-  Udp.endPacket();
+  size_t l = strlen(pbuf);
+
+  // Groesser als ein Datagramm (der ESP32 teilt es sonst in zwei) oder schon beim
+  // Bauen abgeschnitten -> lieber gar nicht senden
+  if ( l > SIP_MAX_UDP || l + 3 >= lbuf )
+    return 513;
+  if ( (uint32_t)sipAddr == 0 )
+    return 503;
+  // Feste Adresse statt Hostname: kein DNS je Paket (blockiert). Rueckgabe pruefen -
+  // beim ESP32 haengt nach gescheitertem beginPacket() write() an das vorige Paket an.
+  if ( !Udp.beginPacket(sipAddr, iSipPort) )
+    return 500;
+  Udp.write((const uint8_t *)pbuf, l);
+  int ok = Udp.endPacket();
 #ifdef DEBUGLOG
-  Serial.printf("\r\n----- send %i bytes -----------------------\r\n%s", strlen(pbuf), pbuf);
+  Serial.printf("\r\n----- send %i bytes -----------------------\r\n%s", (int)l, pbuf);
   Serial.printf("------------------------------------------------\r\n");
 #endif
 
-  return 0;
+  return ok ? 0 : 500;
 }
 
 
@@ -1204,6 +1658,7 @@ void Sip::StartRtp(const char *p) {
     }
   }
   const char *c = strstr(p, "c=IN IP4 ");
+  IPAddress a;   // ohne gueltiges Ziel kein Strom (nicht das des vorigen Anrufs)
   if (c) {
     c += 9;
     char ip[24];
@@ -1211,9 +1666,10 @@ void Sip::StartRtp(const char *p) {
     while (i < (int)sizeof(ip) - 1 && *c && *c != '\r' && *c != '\n' && *c != ' ')
       ip[i++] = *c++;
     ip[i] = 0;
-    remoteRtpIp.fromString(ip);
+    if (!a.fromString(ip)) a = IPAddress((uint32_t)0);
   }
-  if (remoteRtpPort == 0) return;
+  remoteRtpIp = a;
+  if (remoteRtpPort == 0 || (uint32_t)remoteRtpIp == 0) return;
   StartStream(iBeepSeconds);
 }
 
@@ -1251,21 +1707,28 @@ void Sip::StartStream(int beepSec) {
 #endif
 }
 
+// Gespraech beenden; eine noch nicht gelesene Taste verfaellt (sonst wuerde sie
+// nach dem Auflegen einem anderen Anruf zugerechnet)
 void Sip::StopCall() {
   bInCall = false;
+  cLastDtmf = 0;
 }
 
+// CANCEL/BYE werden wiederholt, bis die Anlage antwortet (siehe HandleTimers())
 void Sip::Hangup() {
   if ( !iRingTime )
     return;
 
   if ( bIncoming )
-    ByeIncoming();
+  {
+    inByeBranch = Random();
+    StartReq(REQ_BYE_IN, iInByeCSeq++);
+  }
   else if ( bAnswered )
-    Bye(iInviteCSeq + 1);   // CSeq muss ueber der des INVITE liegen
+    StartReq(REQ_BYE, iInviteCSeq + 1);   // CSeq muss ueber der des INVITE liegen
   else
   {
-    Cancel();               // klingelt noch -> Anruf zurueckziehen
+    StartReq(REQ_CANCEL, iInviteCSeq);    // klingelt noch -> Anruf zurueckziehen
     eCallResult = CALL_NOANSWER;
   }
   StopCall();
@@ -1295,13 +1758,20 @@ void Sip::RtpProcessing() {
       continue;
     }
     iRtpRx++;
+    if ( n < 16 || (rb[0] & 0xC0) != 0x80 )
+      continue;   // zu kurz bzw. kein RTP Version 2
+    // Ereignis hinter dem Kopf: 12 Bytes + 4 je CSRC, ggf. Erweiterung
+    // (4 Bytes Kopf + Laenge in 32-Bit-Worten)
+    int off = 12 + 4 * (rb[0] & 0x0F);
+    if ( (rb[0] & 0x10) && n >= off + 4 )
+      off += 4 + 4 * (((int)rb[off + 2] << 8) | rb[off + 3]);
     // Bei eigenen Anrufen sendet die Gegenstelle laut RFC 3264 mit dem PT
     // unseres Angebots (101), manche Anlagen aber mit dem ihrer Antwort.
     uint8_t pt = rb[1] & 0x7F;
-    if ( n >= 16 && (pt == dtmfPt || (!bIncoming && pt == 101)) )
+    if ( n >= off + 4 && (pt == dtmfPt || (!bIncoming && pt == 101)) )
     {
-      uint8_t  event  = rb[12];
-      bool     endbit = rb[13] & 0x80;
+      uint8_t  event  = rb[off];
+      bool     endbit = rb[off + 1] & 0x80;
       uint32_t ts     = ((uint32_t)rb[4] << 24) | ((uint32_t)rb[5] << 16) | ((uint32_t)rb[6] << 8) | rb[7];
       // Ende-Paket wird 3x gesendet (gleicher Zeitstempel) -> nur einmal zaehlen
       if ( endbit && (!bDtmfTsValid || ts != lastDtmfTs) )
@@ -1312,7 +1782,7 @@ void Sip::RtpProcessing() {
         if ( event <= 9 )       c = '0' + event;
         else if ( event == 10 ) c = '*';
         else if ( event == 11 ) c = '#';
-        if ( c ) { cLastDtmf = c; iDtmfRx++; }
+        if ( c ) { cLastDtmf = c; bDtmfIncoming = bIncoming; iDtmfRx++; }
       }
     }
   }
@@ -1387,9 +1857,11 @@ void Sip::SendRtpFrame() {
   for (int i = 0; i < 160; i++)
     pkt[12 + i] = on ? tone[i & 7] : silence;
 
-  Rtp.beginPacket(remoteRtpIp, remoteRtpPort);
-  Rtp.write(pkt, sizeof(pkt));
-  Rtp.endPacket();
+  // Ziel 0.0.0.0 (z.B. Halten per Re-INVITE): nur den Takt weiterzaehlen
+  if ((uint32_t)remoteRtpIp != 0 && remoteRtpPort != 0 && Rtp.beginPacket(remoteRtpIp, remoteRtpPort)) {
+    Rtp.write(pkt, sizeof(pkt));
+    Rtp.endPacket();
+  }
 
   rtpSeq++;
   rtpTs += 160;

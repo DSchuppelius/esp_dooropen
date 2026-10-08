@@ -52,3 +52,4 @@ Stand: nur der Schaltplan. Ein PCB-Layout gibt es noch nicht.
 - **Nur Kleinspannung:** Die Platine ist für Kleinspannung ausgelegt (Klingeltrafo, Türöffner 8–24 V). Für 230 V an den Relaiskontakten fehlen die nötigen Luft- und Kriechstrecken.
 - **Antenne:** Beim Layout muss die Antenne des WROOM-Moduls über den Platinenrand ragen. Darunter dürfen weder Kupfer noch Bauteile liegen.
 - **Strapping-Pins:** GPIO12, GPIO15 und GPIO5 sind bewusst frei. GPIO0 und EN werden nur vom Auto-Reset und den Tastern benutzt.
+- **Relais beim Start:** Die Relais hängen an GPIO26 und GPIO13 (keine Strapping-Pins, kein Pull-up beim Reset). R23 bzw. R25 (100 kΩ) halten die Gates von Q3/Q4 auf GND, solange der ESP32 startet – die Relais ziehen dabei nicht an. Bei Änderungen die Relais nicht auf GPIO5 oder GPIO15 legen (interner Pull-up beim Reset, siehe [README](../README.md#relais-beim-start)); diese Pull-downs nicht weglassen.

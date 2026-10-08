@@ -62,18 +62,31 @@ class Sip
     // sobald IsRegistering() false ist (Antworten laufen ueber Processing()). (Erweiterung)
     void        StartRegister(int Expires = 3600);
     bool        IsRegistering() { return bRegPending; }
-    bool        IsRegistered() { return bRegistered; }
+    // Angemeldet, solange die zuletzt gewaehrte Gueltigkeit laeuft - auch wenn eine
+    // Erneuerung gerade scheiterte (Paketverlust, Anlage kurz weg): die Bindung beim
+    // Registrar gilt bis dahin weiter.
+    bool        IsRegistered() { return bRegistered && (millis() - regOkAt) < regValidMs; }
     // Beep-Dauer (Sekunden) fuer den RTP-Ton nach dem Abheben; 0 = kein Audio.
     void        SetBeepSeconds(int s) { iBeepSeconds = s; }
     // Liefert die zuletzt empfangene DTMF-Taste (0 wenn keine) und loescht sie.
-    char        ReadDtmf() { char c = cLastDtmf; cLastDtmf = 0; return c; }
+    // incoming: stammt sie aus einem eingehenden Anruf? Beim Empfang gemerkt -
+    // IsIncoming() kann im selben Durchlauf schon false sein (aufgelegt).
+    char        ReadDtmf(bool *incoming = nullptr) {
+      char c = cLastDtmf; cLastDtmf = 0;
+      if ( incoming ) *incoming = bDtmfIncoming;
+      return c;
+    }
     // Anruf sofort beenden: BYE wenn angenommen, sonst CANCEL. (Erweiterung)
     void        Hangup();
+    // CANCEL/BYE eines beendeten Anrufs wird noch wiederholt (Antwort steht aus)
+    bool        IsClosing() { return reqType >= REQ_CANCEL; }
     // Gespraechsdauer nach dem Abheben (Sekunden), mindestens die Beep-Dauer;
     // laenger z.B. fuer die Eingabe eines Oeffnungs-Codes. (Erweiterung)
     void        SetCallSeconds(int s) { iCallSeconds = s; }
     // Ergebnis der letzten Registrierung: -1 = noch keine, 0 = keine Antwort,
-    // sonst SIP-Statuscode (200 = ok, 401 nach Digest = Zugangsdaten falsch, ...)
+    // -2 = Server-Adresse nicht aufloesbar (DNS), sonst SIP-Statuscode (200 = ok,
+    // 401 nach Digest = Zugangsdaten falsch, ...). Zeigt auch den Fehler einer
+    // gescheiterten Erneuerung, waehrend IsRegistered() noch true ist.
     int         RegisterStatus() { return iRegStatus; }
     // Vom Registrar gewaehrte Gueltigkeit (s) der letzten Registrierung, 0 = unbekannt
     int         RegisterExpires() { return iRegGranted; }
@@ -111,13 +124,20 @@ class Sip
     char       *pbuf;
     size_t      lbuf;
     char        caRead[512];      // Call-ID/From/Via/To fuer BYE eines ausgehenden Anrufs
-    char        caAuth[512];      // fertiger (Proxy-)Authorization-Header
+    char        caAuth[512];      // fertiger (Proxy-)Authorization-Header des INVITE
+    char        caRegAuth[512];   // ... des REGISTER (beide werden unveraendert wiederholt)
     bool        bRegistered = false;
 
     // REGISTER-Zustand (Erweiterung)
     bool        bRegPending = false;
     bool        bRegAuthTried = false;
     uint32_t    regSentAt = 0;
+    uint32_t    regTxAt = 0;      // erste Sendung der laufenden Transaktion
+    uint32_t    regOkAt = 0;      // Beginn der zuletzt bestaetigten Registrierung
+    uint32_t    regValidMs = 0;   // deren Gueltigkeit
+    uint32_t    regBranch = 0;    // Wiederholungen mit gleichem Branch
+    uint32_t    regInterval = 500;
+    uint8_t     regSends = 0;
     uint32_t    regCallId = 0;
     uint32_t    regTag = 0;
     int         iRegCSeq = 0;
@@ -132,7 +152,8 @@ class Sip
 
     const char *pSipIp;
     int         iSipPort;
-    IPAddress   sipAddr;          // aufgeloeste Server-Adresse (Absenderpruefung)
+    IPAddress   sipAddr;          // aufgeloeste Server-Adresse (Ziel, Absenderpruefung)
+    bool        bSipHost = false; // Server als Hostname: je REGISTER neu aufloesen
     const char *pSipUser;
     const char *pSipPassWd;
     const char *pMyIp;
@@ -147,12 +168,21 @@ class Sip
     int         iAuthCnt;
     uint32_t    iRingTime;
     uint32_t    iMaxTime;
-    int         iDialRetries;
     int         iInviteCSeq = 1;
     bool        bAnswered = false;
-    bool        bGotResponse = false;   // Antwort auf INVITE da -> nicht mehr wiederholen
 
 	WiFiUDP 	Udp;
+
+    // Ausstehende Anfrage (Erweiterung): Wiederholung ueber UDP nach RFC 3261. Das
+    // Paket wird aus dem unveraenderten Zustand neu gebaut (gleicher Branch, gleiche
+    // CSeq, gleicher Auth-Header) - spart die Kopie des Pakets.
+    enum { REQ_NONE, REQ_INVITE, REQ_CANCEL, REQ_BYE, REQ_BYE_IN };
+    uint8_t     reqType = REQ_NONE;
+    uint8_t     reqSends = 0;
+    int         reqCSeq = 0;
+    uint32_t    reqSentAt = 0;
+    uint32_t    reqInterval = 500;
+    uint32_t    inByeBranch = 0;  // Branch unseres BYE bei eingehendem Anruf
 
     // Eingehender Anruf (Erweiterung)
     bool        bAcceptIncoming = false;
@@ -169,7 +199,7 @@ class Sip
     bool        bRingCall = false;
     char        caRingCaller[32];
     char        caLastCaller[32];
-    char        caRingCallId[100];  // gegen doppelte Meldung bei INVITE-Wiederholungen
+    uint32_t    ringCallIdHash = 0; // Call-ID (Hash, beliebig lang) gegen doppelte Meldung
     int         iInCSeq = 0;
     int         iInByeCSeq = 1;
     uint32_t    inTag = 0;
@@ -199,6 +229,7 @@ class Sip
     uint8_t     rtpPt = 0;        // ausgehandelter Codec: 0 = PCMU, 8 = PCMA
     uint8_t     dtmfPt = 101;     // telephone-event Payload Type laut Antwort
     char        cLastDtmf = 0;
+    bool        bDtmfIncoming = false;   // Taste kam aus einem eingehenden Anruf
     uint32_t    lastDtmfTs = 0;   // RTP-Zeitstempel des letzten DTMF-Ereignisses
     bool        bDtmfTsValid = false;
     uint16_t    iRtpRx = 0;       // Diagnose: angenommene RTP-Pakete
@@ -206,11 +237,13 @@ class Sip
     IPAddress   foreignRtpIp;     //           letzter fremder Absender
     uint8_t     iDtmfRx = 0;      //           erkannte Tasten (RTP und INFO)
 
-	void        HandleUdpPacket(const char *p, bool fromServer);
+	void        HandleUdpPacket(const char *p, bool fromServer, bool truncated);
+    void        HandleResponse(const char *p, bool fromServer);
+    void        HandleTimers();
+    int         Normalize(char *buf, int len, size_t cap, int *bodyAt);
 	void        AddSipLine(const char* constFormat , ... );
     bool        AddCopySipLine(const char *p, const char *psearch);
     void        AddCopyAllLines(const char *p, const char *psearch);
-    bool        ParseParameter(char *dest, int destlen, const char *name, const char *line, char cq = '\"');
     bool        ParseReturnParams(const char *p);
     int         GrepInteger(const char *p, const char *psearch);
     bool        IsResponseTo(const char *p, const char *method);
@@ -218,20 +251,29 @@ class Sip
     bool        IsCallIdStr(const char *p, const char *id);
     bool        IsRequest(const char *p, const char *method);
     bool        HeaderValue(const char *p, const char *name, char *dest, size_t destlen);
-    bool        BuildAuth(const char *p, const char *method, const char *uri);
+    bool        HeaderUri(const char *p, const char *name, char *dest, size_t destlen);
+    bool        BuildAuth(const char *p, const char *method, const char *uri, char *out = nullptr, size_t outLen = 0);
+    void        ResolveServer();
     void        SendRegister(bool withAuth);
     void        HandleRegisterResponse(const char *p);
     void        Ack(const char *pIn);
-    void        Cancel();
-    void        Bye(int cseq);
-    void        Respond(const char *pIn, int code, const char *reason);
-    void        Invite(const char *pIn = 0);
+    int         Cancel();
+    int         Bye(int cseq);
+    void        Respond(const char *pIn, int code, const char *reason, const char *sdp = nullptr);
+    int         Invite(const char *pIn = 0);
+    int         SendInvite();
+
+    // Ausstehende Anfrage (Erweiterung)
+    int         StartReq(uint8_t type, int cseq);
+    int         SendReq();
+    bool        IsReqResponse(const char *p, int cseq);
 
     // Eingehender Anruf (Erweiterung)
-    void        HandleIncomingInvite(const char *p);
+    void        HandleIncomingInvite(const char *p, bool truncated);
+    void        HandleOutgoingReinvite(const char *p);
     bool        ParseOffer(const char *p);
     void        SendIncomingOk();
-    void        ByeIncoming();
+    int         ByeIncoming(int cseq);
     int         BuildSdp(char *out, size_t len, bool offer);
 
     uint32_t    Millis();

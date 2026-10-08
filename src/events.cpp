@@ -11,14 +11,34 @@ uint32_t logTotal = 0;       // fuer die Weboberflaeche: hat sich etwas getan?
 
 static WiFiUDP   syslogUdp;
 static IPAddress syslogIp;
+#if defined(ESP32)
+// logMsg kommt auch aus anderen Tasks (Telegram-Bot): Syslog nur von einem Task zugleich.
+// Beim ersten Aufruf angelegt (statisch, ohne Heap; C++ sichert das Anlegen ab).
+static SemaphoreHandle_t syslogLock() {
+  static StaticSemaphore_t buf;
+  static SemaphoreHandle_t lock = xSemaphoreCreateMutexStatic(&buf);
+  return lock;
+}
+#endif
 
-// Langer Verlauf: neue Zeilen erst sammeln, dann ausserhalb von Anrufen schreiben
+// Langer Verlauf: neue Zeilen erst sammeln, dann gebuendelt ausserhalb von Anrufen schreiben
 static String   pendingLines;
+static uint32_t pendingSince = 0;    // millis() der aeltesten wartenden Zeile
 static const char *EVENTS_FILE = "/events.csv";
 static const char *EVENTS_OLD  = "/events.old.csv";
 
 bool timeValid() {
   return time(nullptr) > 1600000000;   // nach NTP-Abgleich (vorher ~1970)
+}
+
+// Vor dem NTP-Abgleich erfasst (millis): Uhrzeit nachrechnen, sobald sie bekannt ist
+static uint32_t timeFromMillis(uint32_t at) {
+  return timeValid() ? (uint32_t)time(nullptr) - (millis() - at) / 1000 : 0;
+}
+
+uint32_t logEntryTime(const LogEntry &e) {
+  if (e.t == LOG_T_UNKNOWN) return 0;
+  return e.t ? e.t : timeFromMillis(e.at);
 }
 
 // Ereignisnamen im Flash (spart RAM auf dem ESP8266)
@@ -92,6 +112,7 @@ void logEvent(EventType type, const String &detail) {
   // "Unix-Zeit;Typ;Detail" - Detail ohne ';' (setDetail ersetzt Trennzeichen).
   // Ohne Uhrzeit vorlaeufig "m<millis>", wird beim Schreiben umgerechnet.
   if (pendingLines.length() < 1200) {
+    if (!pendingLines.length()) pendingSince = millis();
     pendingLines += (e.t ? String(e.t) : "m" + String(e.at)) + ';' + String(type) + ';' + e.detail + '\n';
   }
   if (detail.length()) logMsg("Ereignis: %s (%s)", eventName(type).c_str(), detail.c_str());
@@ -103,22 +124,44 @@ void logRestore(uint32_t t, uint8_t type, const String &detail) {
   if (type >= EV_COUNT) return;
   LogEntry &e = nextEntry();
   e.at   = millis();
-  e.t    = t;
+  e.t    = t ? t : LOG_T_UNKNOWN;   // ohne Uhrzeit gesichert: bleibt unbekannt
   e.type = (EventType)type;
   setDetail(e, detail);
   logTotal++;
 }
 
-// Gesammelte Zeilen anhaengen; Datei zu gross -> wird zur ".old"-Datei.
-// Eintraege ohne Uhrzeit ("m<millis>") bekommen sie nachtraeglich, sobald die
-// Zeit bekannt ist; ohne Zeitabgleich nach 10 min mit Zeit 0 (unbekannt).
-void eventsFlush() {
-  if (!pendingLines.length() || aSip.IsBusy()) return;
+// Freier Platz im LittleFS (Bytes)
+static size_t fsFree() {
+#if defined(ESP32)
+  size_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
+#else
+  FSInfo i;
+  if (!LittleFS.info(i)) return 0;
+  size_t total = i.totalBytes, used = i.usedBytes;
+#endif
+  return used < total ? total - used : 0;
+}
+
+bool eventsFreeSpace() {
+  if (!LittleFS.exists(EVENTS_OLD)) return false;
+  LittleFS.remove(EVENTS_OLD);
+  logMsg("Speicher knapp: aelterer Verlauf geloescht");
+  return true;
+}
+
+// Gesammelte Zeilen anhaengen - gebuendelt, hoechstens alle EVENT_FLUSH_MS (Flash schonen);
+// Datei zu gross -> wird zur ".old"-Datei. Eintraege ohne Uhrzeit ("m<millis>") bekommen
+// sie nachtraeglich, sobald die Zeit bekannt ist; ohne Zeitabgleich nach 10 min mit
+// Zeit 0 ("ohne Uhrzeit"). force: sofort und alles (vor Neustart/Update).
+void eventsFlush(bool force) {
+  if (!pendingLines.length()) return;
+  if (fsStatus() & FS_FAILED) { pendingLines = ""; return; }
+  if (!force && (aSip.IsBusy() || (millis() - pendingSince < EVENT_FLUSH_MS && pendingLines.length() < 900)))
+    return;
   bool hasUntimed = pendingLines.startsWith("m") || pendingLines.indexOf("\nm") >= 0;
-  if (hasUntimed && !timeValid() && millis() < 600000UL) return;
+  if (!force && hasUntimed && !timeValid() && millis() < 600000UL) return;
   String out;
   if (hasUntimed) {
-    uint32_t now = timeValid() ? (uint32_t)time(nullptr) : 0;
     int start = 0;
     while (start < (int)pendingLines.length()) {
       int end = pendingLines.indexOf('\n', start);
@@ -126,9 +169,7 @@ void eventsFlush() {
       String line = pendingLines.substring(start, end);
       if (line.startsWith("m")) {
         int semi = line.indexOf(';');
-        uint32_t at = strtoul(line.substring(1, semi).c_str(), nullptr, 10);
-        uint32_t t  = now ? now - (millis() - at) / 1000 : 0;
-        line = String(t) + line.substring(semi);
+        line = String(timeFromMillis(strtoul(line.c_str() + 1, nullptr, 10))) + line.substring(semi);
       }
       out += line + '\n';
       start = end + 1;
@@ -136,16 +177,19 @@ void eventsFlush() {
   } else {
     out = pendingLines;
   }
+  pendingLines = "";
+  // Einstellungen brauchen immer Platz: notfalls den aelteren Verlauf opfern
+  size_t need = out.length() + FS_RESERVE_BYTES;
+  if (fsFree() < need && (!eventsFreeSpace() || fsFree() < need)) {
+    logMsg("Verlauf: Speicher knapp - %u Bytes nicht gespeichert", (unsigned)out.length());
+    return;
+  }
   File f = LittleFS.open(EVENTS_FILE, "a");
-  if (!f) { pendingLines = ""; return; }
+  if (!f) return;
   f.print(out);
   size_t size = f.size();
   f.close();
-  pendingLines = "";
-  if (size > EVENT_FILE_MAX) {
-    LittleFS.remove(EVENTS_OLD);
-    LittleFS.rename(EVENTS_FILE, EVENTS_OLD);
-  }
+  if (size > EVENT_FILE_MAX) LittleFS.rename(EVENTS_FILE, EVENTS_OLD);   // ersetzt die alte ".old"
 }
 
 // Unix-Zeit -> "2026-10-02 08:46:12" (Ortszeit), 0 -> ""
@@ -159,46 +203,107 @@ String formatTime(uint32_t t) {
   return buf;
 }
 
-// Langer Verlauf als CSV (Semikolon, UTF-8 mit BOM fuer Excel), aelteste zuerst
-void eventsCsv(WEB_SERVER_CLASS &srv) {
-  eventsFlush();
-  srv.sendHeader("Content-Disposition", "attachment; filename=\"tueroeffner-verlauf.csv\"");
-  srv.sendHeader("Cache-Control", "no-store");
-  srv.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  srv.send(200, "text/csv; charset=utf-8", "");
-  srv.sendContent("\xEF\xBB\xBFZeit;Ereignis;Detail\r\n");
-  for (const char *path : { EVENTS_OLD, EVENTS_FILE }) {
-    File f = LittleFS.open(path, "r");
-    if (!f) continue;
-    String out;
-    while (f.available()) {
-      String line = f.readStringUntil('\n');
-      int a = line.indexOf(';'), b = a < 0 ? -1 : line.indexOf(';', a + 1);
-      if (b < 0) continue;
-      uint32_t t = strtoul(line.substring(0, a).c_str(), nullptr, 10);
-      int type   = line.substring(a + 1, b).toInt();
-      out += formatTime(t);
-      out += ';';
-      out += type >= 0 && type < EV_COUNT ? eventName((EventType)type) : String("?");
-      out += ';';
-      out += line.substring(b + 1);
-      out += "\r\n";
-      if (out.length() > 1000) { srv.sendContent(out); out = ""; feedWatchdog(); }
-    }
-    if (out.length()) srv.sendContent(out);
-    f.close();
+// Zeile "zeit;typ;detail" (aus der Datei oder noch wartend) als CSV-Zeile anhaengen
+static void csvLine(String &out, const String &line) {
+  int a = line.indexOf(';'), b = a < 0 ? -1 : line.indexOf(';', a + 1);
+  if (b < 0) return;
+  uint32_t t = line[0] == 'm' ? timeFromMillis(strtoul(line.c_str() + 1, nullptr, 10))
+                              : strtoul(line.c_str(), nullptr, 10);
+  int type   = atoi(line.c_str() + a + 1);
+  out += t ? formatTime(t) : String(F("ohne Uhrzeit"));
+  out += ';';
+  out += type >= 0 && type < EV_COUNT ? eventName((EventType)type) : String("?");
+  out += ';';
+  out += line.c_str() + b + 1;
+  out += "\r\n";
+}
+
+// Gesammelte CSV-Zeilen als einen Chunk senden. out beginnt mit dem Platzhalter
+// "0000\r\n" fuer die Laenge (HTTP chunked, fuehrende Nullen sind erlaubt).
+static bool csvChunk(String &out, uint32_t deadline) {
+  static const char hexDigit[] = "0123456789abcdef";
+  size_t n = out.length() - 6;
+  bool ok = true;
+  if (n) {
+    for (uint8_t i = 0; i < 4; i++) out.setCharAt(3 - i, hexDigit[(n >> (4 * i)) & 15]);
+    out += "\r\n";
+    ok = webSend((const uint8_t *)out.c_str(), out.length(), deadline);
   }
-  srv.sendContent("");
+  out = F("0000\r\n");
+  yield();   // ESP8266: WLAN-Stack und Software-Watchdog bedienen
+  return ok;
+}
+
+// Datei blockweise lesen (schneller als readStringUntil) und zeilenweise umwandeln;
+// false = Senden abgebrochen
+static bool csvFile(const char *path, String &out, uint32_t deadline) {
+  if (!LittleFS.exists(path)) return true;
+  File f = LittleFS.open(path, "r");
+  if (!f) return true;
+  char   buf[128];
+  String line;
+  bool   ok = true;
+  int    n;
+  while (ok && (n = (int)f.read((uint8_t *)buf, sizeof(buf))) > 0) {
+    for (int i = 0; i < n && ok; i++) {
+      if (buf[i] != '\n') { if (line.length() < 100) line += buf[i]; continue; }
+      csvLine(out, line);
+      line = "";
+      if (out.length() > 1200) ok = csvChunk(out, deadline);
+    }
+  }
+  f.close();
+  return ok;
+}
+
+// Langer Verlauf als CSV (Semikolon, UTF-8 mit BOM fuer Excel), aelteste zuerst.
+// Die Loop steht waehrenddessen (Klingel, SIP): darum direkt ueber die Verbindung senden
+// (webSend) und abbrechen, sobald die Gegenstelle nicht mehr liest oder WEB_SEND_MAX_MS
+// um sind. Antwort "chunked" - ein Abbruch faellt im Browser als Fehler auf.
+void eventsCsv(WEB_SERVER_CLASS &srv) {
+  uint32_t deadline = millis() + WEB_SEND_MAX_MS;
+  String out;
+  out.reserve(1400);
+  out = F("HTTP/1.1 200 OK\r\n"
+          "Content-Type: text/csv; charset=utf-8\r\n"
+          "Content-Disposition: attachment; filename=\"tueroeffner-verlauf.csv\"\r\n"
+          "Cache-Control: no-store\r\n"
+          "Transfer-Encoding: chunked\r\n"
+          "Connection: close\r\n\r\n");
+  bool ok = webSend((const uint8_t *)out.c_str(), out.length(), deadline);
+  out = F("0000\r\n\xEF\xBB\xBFZeit;Ereignis;Detail\r\n");
+  for (const char *path : { EVENTS_OLD, EVENTS_FILE })
+    if (ok) ok = csvFile(path, out, deadline);
+  // noch nicht geschriebene Zeilen (werden gebuendelt gespeichert) mitsenden
+  for (int start = 0; ok && start < (int)pendingLines.length();) {
+    int end = pendingLines.indexOf('\n', start);
+    if (end < 0) end = pendingLines.length();
+    csvLine(out, pendingLines.substring(start, end));
+    start = end + 1;
+  }
+  if (ok) ok = csvChunk(out, deadline);
+  if (ok) ok = webSend((const uint8_t *)"0\r\n\r\n", 5, deadline);
+  if (!ok) {
+    logMsg("Web: CSV-Export abgebrochen (Gegenstelle liest nicht oder zu langsam)");
+    srv.client().stop();
+  }
 }
 
 // Syslog-Ziel aufloesen (beim Start und nach Aenderung)
 void syslogBegin() {
-  syslogIp = IPAddress((uint32_t)0);
-  if (syslogServer.length() == 0 || !netUp()) return;
-  if (!syslogIp.fromString(syslogServer)) {
+  IPAddress ip((uint32_t)0);
+  if (syslogServer.length() && netUp()) {
     IPAddress a;
-    if (WiFi.hostByName(syslogServer.c_str(), a) == 1) syslogIp = a;
+    if (a.fromString(syslogServer) || WiFi.hostByName(syslogServer.c_str(), a) == 1) ip = a;
   }
+#if defined(ESP32)
+  xSemaphoreTake(syslogLock(), portMAX_DELAY);
+#endif
+  syslogIp = ip;
+#if defined(ESP32)
+  xSemaphoreGive(syslogLock());
+#endif
+  if ((uint32_t)ip) fsReport();   // Speicherprobleme vom Start auch an den Syslog-Server
 }
 
 // Meldung auf Seriell und (falls eingestellt) per Syslog (RFC 5424, UDP)
@@ -213,10 +318,18 @@ void logMsgP(const char *fmtP, ...) {
 #endif
   va_end(ap);
   Serial.println(buf);
-  if (!(uint32_t)syslogIp || !netUp()) return;
-  // <134> = local0.info; Zeitstempel "-" (setzt der Server)
-  syslogUdp.beginPacket(syslogIp, SYSLOG_PORT);
-  syslogUdp.print("<134>1 - " HOSTNAME " tueroeffner - - - ");
-  syslogUdp.print(buf);
-  syslogUdp.endPacket();
+#if defined(ESP32)
+  // Syslog gerade von einem anderen Task belegt: kurz warten, sonst nur seriell
+  if (xSemaphoreTake(syslogLock(), pdMS_TO_TICKS(100)) != pdTRUE) return;
+#endif
+  if ((uint32_t)syslogIp && netUp()) {
+    // <134> = local0.info; Zeitstempel "-" (setzt der Server)
+    syslogUdp.beginPacket(syslogIp, SYSLOG_PORT);
+    syslogUdp.print("<134>1 - " HOSTNAME " tueroeffner - - - ");
+    syslogUdp.print(buf);
+    syslogUdp.endPacket();
+  }
+#if defined(ESP32)
+  xSemaphoreGive(syslogLock());
+#endif
 }

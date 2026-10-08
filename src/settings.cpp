@@ -70,8 +70,11 @@ String   hkCode        = "";
 uint32_t signalCount = 0, buzzerTriggers = 0, callCount = 0;
 
 static bool     fsOk          = false;
+static uint8_t  fsFlags       = 0;       // FS_* (app.h): Formatiert, Notbetrieb, Fehler
 static bool     stateDirty    = false;
+static bool     settingsDirty = false;   // Speichern fehlgeschlagen -> spaeter erneut
 static uint32_t lastStateSave = 0;
+static uint32_t lastSettingsTry = 0;
 
 static const char *SETTINGS_FILE = "/settings.txt";
 static const char *SETTINGS_TMP  = "/settings.tmp";
@@ -310,6 +313,30 @@ static bool hkCodeValid(const String &c) {
   return true;
 }
 
+// Feste IP: passt alles zusammen? Sonst ist das Geraet nach dem Neustart nicht erreichbar.
+static uint32_t ipHost(const IPAddress &a) {   // Bytes in Rechenreihenfolge (a[0] oben)
+  return (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
+}
+
+static bool ipUnicast(uint32_t a) {   // nicht 0.x, 127.x, Multicast oder Broadcast
+  uint8_t first = a >> 24;
+  return first != 0 && first != 127 && first < 224;
+}
+
+const __FlashStringHelper *staticIpError(const IPAddress &ip, const IPAddress &mask,
+                                         const IPAddress &gw, const IPAddress &dns) {
+  uint32_t i = ipHost(ip), m = ipHost(mask), g = ipHost(gw), host = ~m;
+  // Maske zusammenhaengend (Einsen vorne), mindestens 2 Adressen fuer Geraete (/30)
+  if (m == 0 || (host & (host + 1)) || host < 3) return F("Subnetzmaske ungültig (z. B. 255.255.255.0)");
+  if (!ipUnicast(i)) return F("IP-Adresse ungültig");
+  if ((i & host) == 0 || (i & host) == host) return F("IP-Adresse ist die Netz- oder Broadcast-Adresse");
+  if (!ipUnicast(g) || (g & host) == 0 || (g & host) == host) return F("Gateway ungültig");
+  if ((i & m) != (g & m)) return F("Gateway liegt nicht im Netz der IP-Adresse (Subnetzmaske?)");
+  if (i == g) return F("IP-Adresse und Gateway sind gleich");
+  if (!ipUnicast(ipHost(dns))) return F("DNS-Server ungültig");
+  return nullptr;
+}
+
 // Eingegebenen Text sicher in einen JSON-String packen
 String jsonEsc(const String &s) {
   String r;
@@ -461,17 +488,29 @@ static void sanitize() {
 // ------------------------------------------------------------
 //  Datei-Format: "schluessel=wert" je Zeile, % \r \n im Wert maskiert
 // ------------------------------------------------------------
-static void writeKv(File &f, const char *key, const String &v) {
-  f.print(key);
-  f.print('=');
+// Zieldatei beim Schreiben; zaehlt die Bytes, die print() angenommen hat
+struct KvOut {
+  File   f;
+  size_t len = 0;
+  bool   ok  = true;    // alle Zeilen vollstaendig angenommen?
+};
+
+static void writeKv(KvOut &o, const char *key, const String &v) {
+  String line;
+  line.reserve(strlen(key) + v.length() + 8);
+  line = key;
+  line += '=';
   for (size_t i = 0; i < v.length(); i++) {
     char c = v[i];
-    if (c == '%')       f.print("%25");
-    else if (c == '\n') f.print("%0A");
-    else if (c == '\r') f.print("%0D");
-    else                f.print(c);
+    if (c == '%')       line += F("%25");
+    else if (c == '\n') line += F("%0A");
+    else if (c == '\r') line += F("%0D");
+    else                line += c;
   }
-  f.print('\n');
+  line += '\n';
+  size_t n = o.f.print(line);
+  o.len += n;
+  if (n != line.length()) o.ok = false;
 }
 
 static String unescape(const String &v) {
@@ -490,6 +529,7 @@ static String unescape(const String &v) {
 
 // Datei zeilenweise lesen und fn(key, value) aufrufen
 template <typename F> static bool readKvFile(const char *path, F fn) {
+  if (!LittleFS.exists(path)) return false;
   File f = LittleFS.open(path, "r");
   if (!f) return false;
   while (f.available()) {
@@ -502,52 +542,78 @@ template <typename F> static bool readKvFile(const char *path, F fn) {
   return true;
 }
 
-// Sicher schreiben: erst Hilfsdatei, dann umbenennen (Stromausfall-fest)
+// Sicher schreiben: erst Hilfsdatei, pruefen, dann umbenennen. rename() ersetzt die alte
+// Datei in einem Schritt (beide Cores rufen lfs_rename auf) - nach einem Stromausfall gilt
+// also die alte oder die neue Datei, nie eine halbe. Geht beim Schreiben etwas schief
+// (Speicher voll, Flash-Fehler), bleibt die alte Datei unangetastet.
+template <typename F> static bool writeKvFileOnce(const char *path, const char *tmp, F fn) {
+  if (LittleFS.exists(tmp)) LittleFS.remove(tmp);   // Reste koennten zufaellig gleich gross sein
+  KvOut o;
+  o.f = LittleFS.open(tmp, "w");
+  if (!o.f) {
+    logMsg("Speichern: %s laesst sich nicht anlegen", tmp);
+    return false;
+  }
+  fn(o);
+  o.f.close();   // erst hier landet der Rest im Flash, Fehler meldet close() nicht ...
+  File chk = LittleFS.open(tmp, "r");   // ... darum die Groesse nachpruefen
+  size_t size = chk ? chk.size() : 0;
+  if (chk) chk.close();
+  if (o.ok && o.len && size == o.len && LittleFS.rename(tmp, path)) return true;
+  LittleFS.remove(tmp);
+  logMsg("Speichern von %s fehlgeschlagen (%u von %u Bytes) - alte Datei bleibt",
+         path, (unsigned)size, (unsigned)o.len);
+  return false;
+}
+
 template <typename F> static bool writeKvFile(const char *path, const char *tmp, F fn) {
   if (!fsOk) return false;
-  File f = LittleFS.open(tmp, "w");
-  if (!f) return false;
-  fn(f);
-  f.close();
-  LittleFS.remove(path);
-  return LittleFS.rename(tmp, path);
+  if (writeKvFileOnce(path, tmp, fn)) return true;
+  // Einstellungen gehen vor: aelteren Verlauf loeschen und noch einmal versuchen
+  return eventsFreeSpace() && writeKvFileOnce(path, tmp, fn);
 }
 
-// Fehlt die Hauptdatei (Stromausfall beim Umbenennen), gilt die Hilfsdatei
-static const char *existingFile(const char *path, const char *tmp) {
-  if (LittleFS.exists(path)) return path;
-  if (LittleFS.exists(tmp))  return tmp;
-  return nullptr;
+// Hauptdatei laden; fehlt sie oder ist sie leer/kaputt (Stromausfall, Speicherfehler),
+// die Hilfsdatei - die wird dann gleich zur Hauptdatei. load() liefert die Anzahl
+// gueltiger Eintraege. Ergebnis: etwas geladen?
+static bool loadKvFile(const char *path, const char *tmp, int (*load)(const char *)) {
+  if (load(path) > 0) return true;
+  if (load(tmp) <= 0) return false;
+  logMsg("%s fehlt oder ist leer - Hilfsdatei %s verwendet", path, tmp);
+  LittleFS.rename(tmp, path);
+  return true;
 }
 
-void saveSettings() {
-  bool ok = writeKvFile(SETTINGS_FILE, SETTINGS_TMP, [](File &f) {
+bool saveSettings() {
+  bool ok = writeKvFile(SETTINGS_FILE, SETTINGS_TMP, [](KvOut &o) {
     SettingIter it;
     SettingDef  d;
-    while (it.next(d)) writeKv(f, d.key, settingValue(d));
+    while (it.next(d)) writeKv(o, d.key, settingValue(d));
   });
-  if (!ok) logMsg("Einstellungen: Speichern fehlgeschlagen");
+  settingsDirty   = !ok && fsOk;   // im RAM gilt die Aenderung - spaeter erneut versuchen
+  lastSettingsTry = millis();
+  if (ok) fsFlags &= ~FS_SAVE_ERR;
+  else    { fsFlags |= FS_SAVE_ERR; logMsg("Einstellungen: Speichern fehlgeschlagen"); }
+  return ok;
 }
 
 void saveState() {
-  // Eintraege ohne Uhrzeit (vor dem NTP-Abgleich) jetzt nachrechnen, sonst gehen sie verloren
-  bool   synced = timeValid();
-  time_t now    = time(nullptr);
+  eventsFlush(true);   // langen Verlauf mitsichern (auch vor Neustart und Update)
   String lg;
   for (uint8_t i = 0; i < logCount; i++) {
     const LogEntry &e = eventLog[(logHead + LOG_SIZE - logCount + i) % LOG_SIZE];   // aelteste zuerst
-    uint32_t t = e.t ? e.t : (synced ? (uint32_t)(now - (millis() - e.at) / 1000) : 0);
-    if (!t) continue;
+    // Eintraege ohne Uhrzeit (vor dem NTP-Abgleich) jetzt nachrechnen; ohne NTP mit 0
+    // sichern, nach einem Neustart erscheinen sie als "ohne Uhrzeit"
     if (lg.length()) lg += ',';
-    lg += String(t) + ':' + String(e.type) + ':' + e.detail;   // Detail ohne ',' und ':'
+    lg += String(logEntryTime(e)) + ':' + String(e.type) + ':' + e.detail;   // Detail ohne ',' und ':'
   }
-  writeKvFile(STATE_FILE, STATE_TMP, [&](File &f) {
-    writeKv(f, "rings",    String(signalCount));
-    writeKv(f, "openings", String(buzzerTriggers));
-    writeKv(f, "calls",    String(callCount));
-    writeKv(f, "log",      lg);
+  bool ok = writeKvFile(STATE_FILE, STATE_TMP, [&](KvOut &o) {
+    writeKv(o, "rings",    String(signalCount));
+    writeKv(o, "openings", String(buzzerTriggers));
+    writeKv(o, "calls",    String(callCount));
+    writeKv(o, "log",      lg);
   });
-  stateDirty    = false;
+  stateDirty    = !ok && fsOk;   // fehlgeschlagen: nach COUNTER_SAVE_MS erneut
   lastStateSave = millis();
 }
 
@@ -559,13 +625,26 @@ void stateChanged() {
 // blockiert kurz und wuerde den Piepton stoeren)
 void settingsLoop() {
   if (stateDirty && !aSip.IsBusy() && millis() - lastStateSave > COUNTER_SAVE_MS) saveState();
-  eventsFlush();   // langer Verlauf (nicht waehrend eines Anrufs)
+  if (settingsDirty && !aSip.IsBusy() && millis() - lastSettingsTry > COUNTER_SAVE_MS) saveSettings();
+  eventsFlush();   // langer Verlauf (gebuendelt, nicht waehrend eines Anrufs)
 }
 
-static void loadState() {
-  const char *path = existingFile(STATE_FILE, STATE_TMP);
-  if (!path) return;
-  readKvFile(path, [](const String &k, const String &v) {
+uint8_t fsStatus() {
+  return fsFlags;
+}
+
+// Probleme mit dem Speicher melden (beim Start seriell, spaeter auch per Syslog)
+void fsReport() {
+  if (fsFlags & FS_FAILED)    logMsg("Speicher: Dateisystem nicht verfuegbar - Notbetrieb, Aenderungen gehen beim Neustart verloren");
+  if (fsFlags & FS_FORMATTED) logMsg("Speicher: Dateisystem war nicht lesbar und wurde beim Start formatiert");
+  if (fsFlags & FS_DAMAGED)   logMsg("Speicher: Einstellungen nicht lesbar - Standardwerte aktiv");
+  if (fsFlags & FS_SAVE_ERR)  logMsg("Speicher: Speichern fehlgeschlagen (voll oder defekt)");
+}
+
+// Zaehler und Protokoll aus einer Datei; Ergebnis = Anzahl erkannter Eintraege
+static int loadState(const char *path) {
+  int n = 0;
+  readKvFile(path, [&n](const String &k, const String &v) {
     if (k == "rings")         signalCount    = strtoul(v.c_str(), nullptr, 10);
     else if (k == "openings") buzzerTriggers = strtoul(v.c_str(), nullptr, 10);
     else if (k == "calls")    callCount      = strtoul(v.c_str(), nullptr, 10);
@@ -585,8 +664,24 @@ static void loadState() {
         }
         start = end + 1;
       }
+    } else {
+      return;   // unbekannter Schluessel
     }
+    n++;
   });
+  return n;
+}
+
+// Einstellungen aus einer Datei; Ergebnis = Anzahl gueltiger Eintraege
+static int loadSettingsFile(const char *path) {
+  int n = 0;
+  readKvFile(path, [&n](const String &k, const String &v) {
+    SettingIter it;
+    SettingDef  d;
+    while (it.next(d))
+      if (k == d.key) { if (applySetting(d, v, true)) n++; break; }
+  });
+  return n;
 }
 
 // ------------------------------------------------------------
@@ -645,7 +740,7 @@ struct Settings {
 
 static bool load() {
   EEPROM.begin(sizeof(Settings) + 8);
-  Settings s;
+  Settings s = {};
   EEPROM.get(0, s);
   EEPROM.end();
   if (s.magic != SETTINGS_MAGIC) return false;
@@ -698,43 +793,70 @@ static bool load() {
   return true;
 }
 #undef LOAD_STR
+
+// Uebernahme erledigt: Kennung im EEPROM ungueltig machen, damit die alten Daten nie
+// wieder geladen werden (z.B. wenn das Dateisystem einmal formatiert werden musste)
+static void retire() {
+  EEPROM.begin(sizeof(Settings) + 8);   // gleiche Groesse wie load() (ESP32: sonst neu angelegt)
+  if (EEPROM.read(0) == SETTINGS_MAGIC) {
+    EEPROM.write(0, 0);
+    if (EEPROM.commit()) logMsg("EEPROM: alte Einstellungen (Firmware bis 1.3) stillgelegt");
+  }
+  EEPROM.end();
+}
 }  // namespace legacy
 
 // ------------------------------------------------------------
 //  Start
 // ------------------------------------------------------------
 void settingsBegin() {
+  // Erst ohne Formatieren einbinden, damit ein Formatieren erkannt und gemeldet wird
 #if defined(ESP32)
-  fsOk = LittleFS.begin(true, "/littlefs", 10, "spiffs");   // Partition "spiffs" aus min_spiffs.csv
+  fsOk = LittleFS.begin(false, "/littlefs", 10, "spiffs");   // Partition "spiffs" aus min_spiffs.csv
+  if (!fsOk) {
+    fsFlags |= FS_FORMATTED;
+    fsOk = LittleFS.begin(true, "/littlefs", 10, "spiffs");
+  }
 #else
   fsOk = LittleFS.begin();
-  if (!fsOk && LittleFS.format()) fsOk = LittleFS.begin();
+  if (!fsOk) {
+    fsFlags |= FS_FORMATTED;
+    fsOk = LittleFS.format() && LittleFS.begin();
+  }
 #endif
   if (!fsOk) {
-    logMsg("Dateisystem nicht verfuegbar - Einstellungen aus dem EEPROM, Aenderungen gehen verloren");
+    // Notbetrieb: Einstellungen aus dem EEPROM (falls noch vorhanden), sonst Standardwerte
+    fsFlags |= FS_FAILED;
     legacy::load();
     sanitize();
+    fsReport();
     return;
   }
 
-  const char *path = existingFile(SETTINGS_FILE, SETTINGS_TMP);
-  if (path) {
-    readKvFile(path, [](const String &k, const String &v) {
-      SettingIter it;
-      SettingDef  d;
-      while (it.next(d))
-        if (k == d.key) { applySetting(d, v, true); break; }
-    });
+  bool hasFile = LittleFS.exists(SETTINGS_FILE) || LittleFS.exists(SETTINGS_TMP);
+  if (loadKvFile(SETTINGS_FILE, SETTINGS_TMP, loadSettingsFile)) {
     sanitize();
-    loadState();
+    loadKvFile(STATE_FILE, STATE_TMP, loadState);
+    legacy::retire();   // laengst uebernommen (aeltere Firmware hat das nicht erledigt)
+    fsReport();
+    return;
+  }
+  if (hasFile) {
+    // Dateien da, aber nicht lesbar: Standardwerte - KEINE uralten EEPROM-Daten
+    fsFlags |= FS_DAMAGED;
+    sanitize();
+    loadKvFile(STATE_FILE, STATE_TMP, loadState);
+    fsReport();
     return;
   }
 
   // Erster Start mit dieser Firmware: alte Einstellungen uebernehmen
-  if (legacy::load()) logMsg("Einstellungen aus dem EEPROM uebernommen");
+  bool legacyOk = legacy::load();
+  if (legacyOk) logMsg("Einstellungen aus dem EEPROM uebernommen");
   sanitize();
-  saveSettings();
+  if (saveSettings() && legacyOk) legacy::retire();
   saveState();
+  fsReport();
 }
 
 // Alle Einstellungen als JSON (Sicherung, inkl. Passwoerter, ohne Zaehler)
@@ -767,6 +889,12 @@ bool restoreFromArgs(WEB_SERVER_CLASS &srv, String &err) {
     else { if (err.length()) err += ", "; err += d.key; }
   }
   sanitize();
+  // Feste IP, die nicht zusammenpasst, wuerde das Geraet nach dem Neustart aussperren
+  if (staticIp && staticIpError(ipAddr, ipMask, ipGw, ipDns)) {
+    staticIp = false;
+    if (err.length()) err += ", ";
+    err += F("staticip (DHCP)");
+  }
   saveSettings();
   return n > 0;
 }

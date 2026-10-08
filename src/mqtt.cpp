@@ -1,14 +1,20 @@
 // Home Assistant (MQTT mit Auto-Discovery)
 #include "app.h"
 #include <PubSubClient.h>
+#include <lwip/dns.h>
+#if defined(ESP32)
+  #include <lwip/tcpip.h>
+#endif
 
 static WiFiClient   mqttNet;
 static PubSubClient mqtt(mqttNet);
-static char     mqttServerBuf[41];              // PubSubClient merkt sich nur den Zeiger
+static char     mqttServerBuf[41];              // Broker (Name oder IP)
+static IPAddress brokerIp;                      // letzte bekannte Adresse (0 = keine)
+static bool     brokerIsIp   = false;           // als IP eingetragen -> kein DNS
 String   devId;                                 // z.B. "tueroeffner_a1b2c3" (aus der MAC)
 String   baseTopic;                             // z.B. "tueroeffner/a1b2c3"
 static uint32_t mqttLastTry  = 0;
-static uint32_t mqttRetryMs  = 5000;            // waechst bei Fehlschlag bis 60 s
+static uint32_t mqttRetryMs  = 5000;            // waechst bei Fehlschlag bis MQTT_RETRY_MAX_MS
 static uint32_t connectedAt  = 0;
 bool     mqttDiscoveryDue    = false;           // Discovery (erneut) senden
 bool     mqttStateDue        = false;           // Zustand sofort senden
@@ -20,6 +26,69 @@ static const char *const COMMANDS[] = { "open", "open2", "lock", "callonring", "
 
 bool mqttConnected() {
   return mqtt.connected();
+}
+
+// ------------------------------------------------------------
+//  Broker-Namen aufloesen, ohne die Loop zu blockieren
+// ------------------------------------------------------------
+// connect(Name) wartet bei gestoertem DNS (auch .local) mehrere Sekunden. Daher fragt
+// die Loop lwIP direkt mit Rueckruf und schaut danach nur noch nach dem Ergebnis.
+// lwIP haelt Antworten gemaess TTL vor; scheitert eine Abfrage, gilt die letzte
+// bekannte Adresse weiter.
+enum : uint8_t { DNS_IDLE, DNS_BUSY, DNS_DONE };
+static volatile uint8_t  dnsState = DNS_IDLE;
+static volatile uint32_t dnsAddr  = 0;          // Ergebnis (IPv4), 0 = nicht gefunden
+static volatile uint8_t  dnsGen   = 0;          // Antworten abgebrochener Abfragen verwerfen
+static uint32_t dnsStartedAt = 0;
+
+// Rueckruf aus lwIP (ESP32: lwIP-Task, ESP8266: Systemkontext)
+static void dnsFound(const char *, const ip_addr_t *addr, void *arg) {
+  if ((uint8_t)(uintptr_t)arg != dnsGen) return;
+  dnsAddr  = addr && IP_IS_V4(addr) ? ip4_addr_get_u32(ip_2_ip4(addr)) : 0;
+  dnsState = DNS_DONE;
+}
+
+static void dnsStart() {
+  ip_addr_t a;
+  dnsAddr      = 0;
+  dnsState     = DNS_BUSY;
+  dnsStartedAt = millis();
+#if defined(ESP32)
+  LOCK_TCPIP_CORE();   // lwIP direkt nur mit Kern-Sperre
+#endif
+  err_t e = dns_gethostbyname_addrtype(mqttServerBuf, &a, dnsFound, (void *)(uintptr_t)dnsGen,
+                                       LWIP_DNS_ADDRTYPE_IPV4);
+#if defined(ESP32)
+  UNLOCK_TCPIP_CORE();
+#endif
+  if (e == ERR_OK) {                  // aus dem Cache
+    dnsAddr  = ip4_addr_get_u32(ip_2_ip4(&a));
+    dnsState = DNS_DONE;
+  } else if (e != ERR_INPROGRESS) {   // Fehler (dnsAddr = 0)
+    dnsState = DNS_DONE;
+  }
+}
+
+// Adresse des Brokers: 1 = bekannt (brokerIp), 0 = Abfrage laeuft, -1 = nicht aufloesbar
+static int8_t brokerAddress() {
+  if (brokerIsIp) return 1;
+  if (dnsState == DNS_IDLE) dnsStart();
+  if (dnsState == DNS_BUSY) {
+    if (millis() - dnsStartedAt < MQTT_DNS_TIMEOUT_MS) return 0;
+    dnsGen++;                         // zu spaet -> Antwort verwerfen
+    dnsAddr = 0;
+  }
+  dnsState = DNS_IDLE;                // naechster Versuch fragt erneut
+  if (dnsAddr) {
+    brokerIp = IPAddress((uint32_t)dnsAddr);
+    return 1;
+  }
+  if ((uint32_t)brokerIp) {
+    logMsg("MQTT: %s nicht aufloesbar - nutze %s", mqttServerBuf, brokerIp.toString().c_str());
+    return 1;
+  }
+  logMsg("MQTT: %s nicht aufloesbar", mqttServerBuf);
+  return -1;
 }
 
 static String discoveryTopic(const char *component, const char *object) {
@@ -231,7 +300,12 @@ void mqttBegin() {
   mac.toLowerCase();
   devId     = "tueroeffner_" + mac.substring(6);
   baseTopic = "tueroeffner/" + mac.substring(6);
+#if defined(ESP32)
+  // NetworkClient hat eine eigene Frist fuer connect() (sonst 3 s); setTimeout() wirkt dort nicht
+  mqttNet.setConnectionTimeout(MQTT_CONNECT_TIMEOUT_MS);
+#else
   mqttNet.setTimeout(MQTT_CONNECT_TIMEOUT_MS);
+#endif
   mqtt.setBufferSize(1024);     // Discovery-Nachrichten sind laenger als die 256-Byte-Voreinstellung
   mqtt.setSocketTimeout(2);     // max. Wartezeit auf CONNACK (s)
   mqtt.setCallback(mqttCallback);
@@ -247,7 +321,11 @@ void initMqtt() {
   size_t n = mqttServer.length() < sizeof(mqttServerBuf) ? mqttServer.length() : sizeof(mqttServerBuf) - 1;
   memcpy(mqttServerBuf, mqttServer.c_str(), n);
   mqttServerBuf[n] = 0;
-  mqtt.setServer(mqttServerBuf, mqttPort);
+  // IP direkt verwenden, Namen loest mqttLoop() auf (laufende Abfrage verwerfen)
+  brokerIsIp = brokerIp.fromString(mqttServerBuf);
+  if (!brokerIsIp) brokerIp = IPAddress((uint32_t)0);
+  dnsGen++;
+  dnsState    = DNS_IDLE;
   mqttRetryMs = 5000;
   mqttLastTry = millis() - mqttRetryMs;   // sofort verbinden
 }
@@ -259,27 +337,35 @@ void mqttLoop() {
     // Verbindungsaufbau blockiert kurz -> nicht waehrend eines Anrufs oder Summens
     if (aSip.IsBusy() || buzzerActive || !netUp()) return;
     if (millis() - mqttLastTry < mqttRetryMs) return;
+    int8_t addr = brokerAddress();
+    if (addr == 0) return;   // Name wird noch aufgeloest
     mqttLastTry = millis();
 
+    bool ok = false;
     String will = baseTopic + "/status";
-    bool ok = mqtt.connect(devId.c_str(),
-                           mqttUser.length() ? mqttUser.c_str() : nullptr,
-                           mqttPw.length()   ? mqttPw.c_str()   : nullptr,
-                           will.c_str(), 0, true, "offline");
+    if (addr > 0) {
+      mqtt.setServer(brokerIp, mqttPort);
+      ok = mqtt.connect(devId.c_str(),
+                        mqttUser.length() ? mqttUser.c_str() : nullptr,
+                        mqttPw.length()   ? mqttPw.c_str()   : nullptr,
+                        will.c_str(), 0, true, "offline");
+      if (!ok) logMsg("MQTT: Verbindung fehlgeschlagen (rc=%d)", mqtt.state());
+    }
     if (!ok) {
-      logMsg("MQTT: Verbindung fehlgeschlagen (rc=%d)", mqtt.state());
-      mqttRetryMs = min<uint32_t>(mqttRetryMs * 2, 60000);
+      // Broker weg: Abstand verdoppeln (bis einige Minuten), jeder Versuch kostet Zeit
+      mqttRetryMs = min<uint32_t>(mqttRetryMs * 2, MQTT_RETRY_MAX_MS);
       return;
     }
     logMsg("MQTT: verbunden");
     connectedAt = millis();
     mqttRetryMs = 5000;
     mqtt.publish(will.c_str(), "online", true);
-    mqtt.subscribe((baseTopic + "/+/set").c_str());
-    mqtt.subscribe(MQTT_DISCOVERY_PREFIX "/status");
-    // Versehentlich gespeicherte (retained) Befehle loeschen
+    // Versehentlich gespeicherte (retained) Befehle loeschen - VOR dem Abonnieren:
+    // der Broker liefert gespeicherte Nachrichten direkt nach dem Abonnieren aus
     for (const char *c : COMMANDS)
       mqtt.publish((baseTopic + "/" + c + "/set").c_str(), "", true);
+    mqtt.subscribe((baseTopic + "/+/set").c_str());
+    mqtt.subscribe(MQTT_DISCOVERY_PREFIX "/status");
     mqttDiscoveryDue = true;
   }
 
