@@ -1,0 +1,2 @@
+# Shell-Skripte immer mit LF (sonst laufen sie nach einem Windows-Checkout unter Linux nicht)
+*.sh text eol=lf

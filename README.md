@@ -561,6 +561,40 @@ antwortet das Gerät mit `401` (ohne Browser-Anmeldefenster).
 Werkzeuge können statt der Anmeldeseite **Basic-Auth** verwenden, z. B.:
 `curl -X POST -u admin:PASSWORT http://tueroeffner.local/open`
 
+### Tür per Desktop-Symbol (Windows, Linux)
+
+Ein Symbol **„Tür öffnen“** auf dem Desktop – ein Klick öffnet die Tür (z. B. am
+Empfang einer Praxis):
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File tuer-oeffnen.ps1 -Install -Address 192.168.20.50
+```
+
+```bash
+# Linux (GNOME, KDE, Xfce ...; braucht curl)
+bash tuer-oeffnen.sh --install --address 192.168.20.50
+```
+
+Skripte: [tools/tuer-oeffnen.ps1](tools/tuer-oeffnen.ps1) bzw.
+[tools/tuer-oeffnen.sh](tools/tuer-oeffnen.sh). Unter Linux erscheint der Starter im
+Anwendungsmenü und – falls der Desktop Symbole zeigt – auf dem Desktop (GNOME braucht
+dafür die Erweiterung „Desktop Icons NG“, sonst über das Menü bzw. als Favorit).
+
+- Als Adresse am besten die **IP** des Türöffners (feste IP oder DHCP-Reservierung);
+  `tueroeffner.local` wird nur im selben Subnetz aufgelöst.
+- Ist ein Tür-Passwort gesetzt, fragt das Symbol beim ersten Mal nach Benutzer und
+  Passwort und merkt sie sich: Windows verschlüsselt (DPAPI, nur dieser Windows-Benutzer
+  auf diesem PC), Linux im Schlüsselbund (`secret-tool`) oder sonst in einer nur für
+  den Benutzer lesbaren Datei. Für das Fenster unter Linux `zenity` oder `kdialog`.
+  Dafür einen eigenen Benutzer anlegen (Tür-Zugang oder **Weitere Benutzer** mit Rolle
+  Tür), nie den Admin.
+- Mehrfaches Klicken öffnet nur einmal (verlängert höchstens die Summerzeit).
+- Gespeicherte Anmeldung vergessen: `-Reset` bzw. `--reset` (mit derselben Adresse).
+  Entfernen: Symbol löschen, dazu `%LOCALAPPDATA%\Tueroeffner` (Windows) bzw.
+  `~/.local/share/tueroeffner` und `~/.local/share/applications/tueroeffner.desktop`
+  (Linux).
+
 ## Sicherheit
 
 - **Passwort setzen!** Ohne Admin-Passwort kann jeder im WLAN die Tür öffnen; die
