@@ -161,7 +161,7 @@ bool startChain() {
     logMsg("SIP: es klingelt - eingehender Anruf beendet, Rufkette folgt");
     aSip.Hangup();
     aSip.SetAcceptIncoming(false);   // bis dahin keinen neuen Anruf annehmen
-    ringPendingAt = millis() | 1;    // 0 = nichts ausstehend
+    ringPendingAt = msStamp();       // 0 = nichts ausstehend
     return true;
   }
   if (aSip.IsBusy() || !dialIndex(0)) return false;

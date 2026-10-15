@@ -264,7 +264,7 @@ static void startServices() {
 
 // Zugangsdaten wurden im Portal gespeichert (WiFiManager-Rueckruf)
 static void wifiSavedCallback() {
-  wifiSavedAt = millis() | 1;
+  wifiSavedAt = msStamp();
   wifiCreds   = true;
   logMsg("WLAN-Zugangsdaten gespeichert - verbinde");
 }
@@ -344,7 +344,7 @@ static void netLoop() {
     netDownAt   = 0;
     portalTried = false;
   } else if (!netDownAt) {
-    netDownAt = millis() | 1;
+    netDownAt = msStamp();
   }
 
 #if !defined(USE_ETHERNET)
@@ -392,7 +392,7 @@ static void selfHeal() {
   if (netUp() || (ethStarted && !ETH.linkUp())) {
     ethStuckAt = 0;
   } else if (!ethStuckAt) {
-    ethStuckAt = millis() | 1;
+    ethStuckAt = msStamp();
   } else if (millis() - ethStuckAt > (uint32_t)ETH_NO_IP_RESTART_MIN * 60000UL) {
     logMsg("Selbstheilung: Ethernet ohne IP-Adresse -> Neustart");
     restartNow(RR_WIFI_LOST);

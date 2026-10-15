@@ -132,6 +132,16 @@ static void testPressWatch() {
     press(w, 3000, 3002); press(w, 3030, 3031); press(w, 3060, 3062);
     CHECK(!presswatch::poll(w, false, 3200, DB), "Stoerspitzen");
   }
+  {  // Stoerspitze mit beiden Flanken in derselben Millisekunde (gerade und ungerade):
+     // der Beginn darf nicht in der Zukunft liegen, sonst gaelte sie als langer Druck
+    presswatch::Watch w{};
+    press(w, 4000, 4000);
+    CHECK(!presswatch::poll(w, false, 4100, DB), "Stoerspitze in gerader Millisekunde");
+    press(w, 5001, 5001);
+    CHECK(!presswatch::poll(w, false, 5100, DB), "Stoerspitze in ungerader Millisekunde");
+    press(w, 0, 0);
+    CHECK(!presswatch::poll(w, false, 100, DB), "Stoerspitze bei millis() = 0");
+  }
   {  // Zwei Druecke waehrend einer Blockade: mindestens einer wird gemeldet
     presswatch::Watch w{};
     press(w, 1000, 1200); press(w, 1500, 1700);

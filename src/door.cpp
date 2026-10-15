@@ -154,7 +154,7 @@ void startBuzzer(EventType source, const String &detail) {
 
 void stopBuzzer() {
   buzzerTicker.detach();
-  if (buzzerActive) buzzerEndedAt = millis() | 1;   // Klingel-Sperre (Einkopplung) laeuft ab jetzt
+  if (buzzerActive) buzzerEndedAt = msStamp();   // Klingel-Sperre (Einkopplung) laeuft ab jetzt
   buzzerActive = false;
   relayPin(false);
   displayDirty = true;
@@ -677,7 +677,7 @@ bool checkEmergencyReset() {
     uint32_t now = millis();
     bool pressed = digitalRead(PIN_BTN_RING) == LOW;
     if (pressed) releasedAt = 0;
-    else if (!releasedAt) releasedAt = now | 1;
+    else if (!releasedAt) releasedAt = msStamp(now);
     if (releasedAt && now - releasedAt > SIGNAL_DEBOUNCE_MS) break;   // losgelassen
     if (!held && pressed && now - t0 >= PW_RESET_HOLD_MS) {
       held = true;

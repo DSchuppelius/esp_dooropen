@@ -29,6 +29,11 @@
 
 #define FW_VERSION "1.5.0"
 
+// millis() als Zeitstempel, bei dem 0 "nicht gesetzt" bedeutet: nie 0 und nie in der
+// Zukunft (hoechstens 1 ms alt). Nicht millis() | 1 - das laege bei geradem millis()
+// 1 ms voraus, und millis() - t ergaebe in derselben Millisekunde 0xFFFFFFFF.
+static inline uint32_t msStamp(uint32_t now = millis()) { return (now - 1) | 1; }
+
 // ------------------------------------------------------------
 //  Einstellungen (settings.cpp)
 // ------------------------------------------------------------

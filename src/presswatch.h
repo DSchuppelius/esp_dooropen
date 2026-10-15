@@ -33,7 +33,10 @@ static inline void IRAM_ATTR edge(Watch &w, bool active, uint32_t now, uint32_t 
       w.longOn = false;
       w.seen   = false;
     }
-    w.since = now | 1;
+    // Nie 0 (= inaktiv) und nie in der Zukunft: now | 1 laege bei geradem now 1 ms
+    // voraus, eine Stoerspitze in derselben Millisekunde ergaebe dann
+    // now - since = 0xFFFFFFFF und gaelte als langer Druck
+    w.since = (now - 1) | 1;
   } else if (w.since) {
     if (now - w.since >= debounce) w.longOn = true;
     w.since   = 0;
