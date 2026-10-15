@@ -178,7 +178,6 @@ extern int8_t  chainIdx;
 extern String  lastCallNr;
 
 void initSip();                   // nach Aenderung der Zugangsdaten / neuer IP
-void applyCallSeconds();          // nach Aenderung des Oeffnen-Codes
 const char *sipStateText();
 void phoneLoop();
 bool startChain();

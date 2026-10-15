@@ -21,6 +21,7 @@ static char dialBuf[MAX_DIAL_LEN + 1];
 int8_t   chainIdx = -1;          // Rufkette: Index der gerade angerufenen Nummer, -1 = keine
 String   lastCallNr;
 static String   dtmfBuf;         // eingegebene Ziffern fuer den Code
+static uint32_t dialAt         = 0;   // Beginn des laufenden eigenen Anrufs (Diagnose)
 static bool     sipInited      = false;
 static uint32_t lastRegisterAt = 0;
 static uint8_t  regFastTries   = 0;   // schnelle Wiederholungen nach Init
@@ -46,11 +47,6 @@ static void copyToField(char *dst, size_t dstSize, const String &src) {
   dst[n] = '\0';
 }
 
-// Mit Oeffnungs-Code bleibt das Gespraech laenger offen, damit man ihn tippen kann
-void applyCallSeconds() {
-  aSip.SetCallSeconds(dtmfPin.length() ? SIP_PIN_CALL_SECONDS : 0);
-}
-
 // Klingeln per Anruf: ist der Anrufer eine der Klingel-Nummern ("*" = jeder)?
 static bool ringFilter(const char *caller) {
   if (ringCallers.length() == 0) return false;
@@ -73,9 +69,11 @@ void initSip() {
   aSip.Init(sipServerBuf, sipPort, myIpBuf, sipPort,
             sipUserBuf, sipPwBuf, SIP_MAX_DIAL_SEC);
   aSip.SetBeepSeconds(SIP_BEEP_SECONDS);
+  aSip.SetAliveBeepSeconds(SIP_ALIVE_BEEP_SECONDS);
   aSip.SetIncomingSeconds(INCOMING_CALL_SECONDS);
   aSip.SetRingFilter(ringFilter);
-  applyCallSeconds();
+  // Auch ohne Code nicht schon nach dem Piepton auflegen: '*' braucht ebenso Zeit
+  aSip.SetCallSeconds(SIP_CALL_SECONDS);
   sipInited      = true;
   regFastTries   = 3;   // erster Versuch nach Boot scheitert oft am Timing
   lastRegisterAt = millis() - 3600000UL;   // sofort anmelden
@@ -146,6 +144,7 @@ static bool dialIndex(uint8_t idx) {
   if (!aSip.Dial(dialBuf, SIP_CALLER_NAME)) return false;   // Anruf laeuft schon
   lastCallNr = nr;
   dtmfBuf    = "";
+  dialAt     = millis();
   callCount++;
   logEvent(EV_CALL, nr);
   markActivity();
@@ -353,8 +352,12 @@ void phoneLoop() {
   aSip.Processing(acSipIn, sizeof(acSipIn));
   registerLoop();
 
-  // Nach jedem Gespraech eine Zeile zur Diagnose (Audio und Tasten beim Kunden)
+  // Nach jedem Gespraech eine Zeile zur Diagnose (Audio und Tasten beim Kunden).
+  // Abheben sehr kurz nach dem Waehlen: nimmt die Anlage selbst ab (Mailbox, Gruppe)?
   static bool wasInCall = false;
+  if (!wasInCall && aSip.InCall() && !aSip.IsIncoming())
+    logMsg("SIP: %s hat abgehoben (nach %lu s)", lastCallNr.c_str(),
+           (unsigned long)((millis() - dialAt) / 1000));
   if (wasInCall && !aSip.InCall()) {
     char info[128];
     aSip.CallInfo(info, sizeof(info));

@@ -1850,8 +1850,12 @@ void Sip::SendRtpFrame() {
 
   // Muster: 200 ms Ton, 200 ms Pause (10 Frames an, 10 aus) - am Stream-Takt
   // ausgerichtet statt an millis(), damit die Toene sauber geschnitten sind.
-  // Nach der Beep-Dauer nur noch Stille (Gespraech bleibt fuer Code-Eingabe offen).
-  bool on = (rtpFrame % 20) < 10 && rtpFrame < (uint32_t)iStreamBeepSec * 50;
+  // Nach der Beep-Dauer (Gespraech bleibt fuer '*' bzw. Code offen) alle iAliveSec
+  // Sekunden ein kurzer Piep (100 ms), sonst Stille.
+  uint32_t beepFrames = (uint32_t)iStreamBeepSec * 50;
+  uint32_t period     = (uint32_t)iAliveSec * 50;
+  bool on = rtpFrame < beepFrames ? (rtpFrame % 20) < 10
+                                  : period && (rtpFrame - beepFrames) % period >= period - 5;
   const uint8_t *tone   = rtpPt == 8 ? alawTone : ulawTone;
   const uint8_t silence = rtpPt == 8 ? 0xD5 : 0xFF;   // Stille in A-law / u-law
   for (int i = 0; i < 160; i++)

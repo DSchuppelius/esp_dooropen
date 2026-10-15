@@ -418,6 +418,40 @@ static void testRtpHeader() {
   s.Hangup();
 }
 
+// Tonmuster: 6 s Piepton (200 ms an/aus), danach alle 3 s ein kurzer Piep (100 ms)
+static void testAliveBeep() {
+  Sip s(outBuf, sizeof(outBuf));
+  s.Init("192.168.1.10", 5060, "192.168.1.50", 5060, "200", "geheim", 15);
+  s.SetBeepSeconds(6);
+  s.SetAliveBeepSeconds(3);
+  CHECK(s.Dial("100", "Tuer"), "Dial");
+  feed(s, answer200(header(lastSent(s), "Call-ID: "), 1, "<sip:100@192.168.1.10>;tag=o", SDP_ANSWER));
+  CHECK(s.bInCall && s.rtpPt == 8, "Gespraech laeuft (PCMA)");
+  CHECK(s.rtpFrame == 1, "erster Frame schon beim Annehmen gesendet");
+  std::string pattern = "x";   // je Frame: 'x' = Ton, '.' = Stille (Sample 2 = Sinus-Spitze)
+  for (int f = 1; f < 610; f++) {
+    s.SendRtpFrame();
+    pattern += (uint8_t)s.Rtp.sent.back()[12 + 2] == 0xD5 ? '.' : 'x';
+  }
+  CHECK(pattern.substr(0, 20) == std::string(10, 'x') + std::string(10, '.'), "Piepton 200 ms an/aus");
+  CHECK(pattern.substr(280, 20) == std::string(10, 'x') + std::string(10, '.'), "Piepton bis 6 s");
+  CHECK(pattern.substr(300, 145) == std::string(145, '.'), "danach Stille");
+  CHECK(pattern.substr(445, 5) == "xxxxx" && pattern.substr(595, 5) == "xxxxx", "kurzer Piep alle 3 s");
+  CHECK(pattern.substr(450, 145) == std::string(145, '.'), "zwischen den Pieps Stille");
+  s.Hangup();
+
+  s.SetAliveBeepSeconds(0);
+  CHECK(s.Dial("100", "Tuer"), "Dial ohne Lebenszeichen");
+  feed(s, answer200(header(lastSent(s), "Call-ID: "), 1, "<sip:100@192.168.1.10>;tag=o", SDP_ANSWER));
+  bool silent = true;
+  for (int f = 1; f < 610; f++) {
+    s.SendRtpFrame();
+    if (f >= 300 && (uint8_t)s.Rtp.sent.back()[12 + 2] != 0xD5) silent = false;
+  }
+  CHECK(silent, "ohne Lebenszeichen nach dem Piepton Stille");
+  s.Hangup();
+}
+
 static bool everyone(const char *) { return true; }
 
 // S11: Re-INVITE im ausgehenden Gespraech
@@ -840,6 +874,7 @@ int main() {
   testIncomingBye();
   testDtmfOrigin();
   testRtpHeader();
+  testAliveBeep();
   testReinvite();
   testRingCall();
   testRingFilter2();

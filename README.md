@@ -18,9 +18,10 @@ Präprozessor-Weiche automatisch an.
 - **SIP-Anruf beim Klingeln** (getestet mit Asterisk, REGISTER mit Digest-Auth
   inkl. `qop=auth`/`opaque`, auch LANCOM-kompatibel):
   - **Rufkette**: mehrere Nummern nacheinander (z. B. `100, 101`), bis jemand abhebt,
-  - nach dem Abheben ein Piepton im Hörer (G.711 A-law/µ-law),
+  - nach dem Abheben ein Piepton im Hörer (G.711 A-law/µ-law), danach ein kurzer
+    Piep alle 3 s, solange die Leitung offen ist,
   - **`*` am Telefon** (DTMF per RFC 4733 oder SIP INFO) öffnet die Tür und legt auf –
-    oder ein **Öffnen-Code** (z. B. `1234`), dann bleibt das Gespräch 30 s offen,
+    oder ein **Öffnen-Code** (z. B. `1234`); dafür bleibt das Gespräch 30 s offen,
   - wird nicht abgehoben, wird der Anruf nach 15 s per `CANCEL` zurückgezogen,
   - **SIP-Status im Klartext** und Ergebnis des letzten Anrufs,
   - **robust im WLAN**: `INVITE` (auch mit Digest), `CANCEL`, `BYE` und `REGISTER`
@@ -807,10 +808,11 @@ Grundeinstellungen in [src/config.h](src/config.h), u. a.:
 |--------------------------|-----------------|----------------------------------------------------|
 | `SIP_MAX_DIAL_SEC`       | 15              | Anruf wird nach dieser Zeit beendet                |
 | `SIP_BEEP_SECONDS`       | 6               | Dauer des Pieptons nach dem Abheben (0 = kein Ton) |
+| `SIP_ALIVE_BEEP_SECONDS` | 3               | danach kurzer Piep alle … s (0 = aus)              |
 | `SIP_REG_EXPIRES`        | 120             | Gültigkeit der SIP-Registrierung (s)               |
 | `RING_NOTIFY_MS`         | 10000           | Anzeigedauer „Es klingelt!“                        |
 | `RING_COOLDOWN_MS`       | 5000            | Sperre gegen Sturmklingeln                         |
-| `SIP_PIN_CALL_SECONDS`   | 30              | Gesprächsdauer mit Öffnen-Code                     |
+| `SIP_CALL_SECONDS`       | 30              | Gesprächsdauer nach dem Abheben (für `*`/Code)     |
 | `WIFI_LOST_RESTART_MIN`  | 30              | Neustart, wenn das WLAN so lange weg ist           |
 | `WIFI_RETRY_SEC`         | 60              | WLAN weg: so oft neu verbinden (s)                 |
 | `ETH_NO_IP_RESTART_MIN`  | 10              | Ethernet: Neustart, wenn Link ohne IP so lange     |

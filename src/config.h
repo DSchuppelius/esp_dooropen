@@ -224,8 +224,9 @@
 // ESP8266: so viele Mitteilungen warten hoechstens (sonst faellt die aelteste weg)
 #define PUSH_QUEUE_LEN          3
 
-// Wie lange ein Anruf mit Oeffnungs-Code nach dem Abheben offen bleibt (s)
-#define SIP_PIN_CALL_SECONDS    30
+// Wie lange ein Anruf nach dem Abheben offen bleibt (s), damit man in Ruhe '*'
+// bzw. den Oeffnungs-Code tippen kann; Auflegen beendet ihn jederzeit
+#define SIP_CALL_SECONDS        30
 
 // Syslog (UDP) fuer die Fehlersuche aus der Ferne; Server im Web einstellbar
 #define SYSLOG_PORT             514
@@ -287,6 +288,9 @@
 #define SIP_REG_RETRY_SEC 10
 // Beep-Dauer im Hoerer nach dem Abheben (Sekunden); 0 = nur klingeln, kein Audio.
 #define SIP_BEEP_SECONDS 6
+// Danach, solange das Gespraech offen ist: alle so viele Sekunden ein kurzer Piep
+// (Leitung steht noch, '*' bzw. Code moeglich); 0 = Stille.
+#define SIP_ALIVE_BEEP_SECONDS 3
 
 // ============================================================
 //  Home Assistant (MQTT mit Auto-Discovery)

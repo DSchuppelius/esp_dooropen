@@ -68,6 +68,9 @@ class Sip
     bool        IsRegistered() { return bRegistered && (millis() - regOkAt) < regValidMs; }
     // Beep-Dauer (Sekunden) fuer den RTP-Ton nach dem Abheben; 0 = kein Audio.
     void        SetBeepSeconds(int s) { iBeepSeconds = s; }
+    // Danach bis zum Auflegen alle s Sekunden ein kurzer Piep (Leitung steht noch);
+    // 0 = Stille. (Erweiterung)
+    void        SetAliveBeepSeconds(int s) { iAliveSec = s; }
     // Liefert die zuletzt empfangene DTMF-Taste (0 wenn keine) und loescht sie.
     // incoming: stammt sie aus einem eingehenden Anruf? Beim Empfang gemerkt -
     // IsIncoming() kann im selben Durchlauf schon false sein (aufgelegt).
@@ -223,6 +226,7 @@ class Sip
     uint32_t    rtpFrame = 0;
     int         iBeepSeconds = 0;
     int         iStreamBeepSec = 0;   // Beep-Dauer des laufenden Gespraechs
+    int         iAliveSec = 0;        // danach Abstand der kurzen Pieps, 0 = keine
     uint8_t     ulawTone[8];
     uint8_t     alawTone[8];
     bool        bToneReady = false;

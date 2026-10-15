@@ -733,7 +733,6 @@ void handleSetDial() {
   dtmfPin  = pin;
   if (server.hasArg("auto")) callOnRing = server.arg("auto") == "1";
   buzzerSeconds = (uint8_t)dur;
-  applyCallSeconds();
   bool saved = saveSettings();
   displayDirty = true;
   mqttStateDue = true;
